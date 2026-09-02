@@ -1,0 +1,342 @@
+// WebMCP Forge — database schema.
+//
+// Supabase is used purely as hosted PostgreSQL. There is no Supabase Auth, no
+// Data API and no browser-side database access: every read and write goes
+// through trusted Next.js server code.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Ownership
+// ---------------------------------------------------------------------------
+
+/// An anonymous builder session. The raw bearer token lives only in an
+/// HttpOnly cookie on the user's device; we store nothing but its SHA-256 hash,
+/// so a database leak cannot be replayed as a session.
+model BuilderSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  expiresAt  DateTime  @map("expires_at")
+
+  sites Site[]
+
+  @@index([expiresAt])
+  @@map("builder_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Sites
+// ---------------------------------------------------------------------------
+
+enum SiteStatus {
+  DRAFT
+  SCANNED
+  CONFIGURED
+  PUBLISHED
+
+  @@map("site_status")
+}
+
+enum Platform {
+  FRAMER
+  WIX
+  WEBFLOW
+  SQUARESPACE
+  NEXTJS
+  CUSTOM
+  UNKNOWN
+
+  @@map("platform")
+}
+
+/// A portfolio being made agent-ready.
+model Site {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Public, non-secret runtime identifier (`wmf_` + 24 base32 chars). It is
+  /// embedded in the installation snippet, so it is not a credential — but it
+  /// is random rather than sequential so sites cannot be enumerated.
+  publicId String @unique @map("public_id")
+
+  createdBySessionId String         @map("created_by_session_id") @db.Uuid
+  createdBySession   BuilderSession @relation(fields: [createdBySessionId], references: [id], onDelete: Cascade)
+
+  /// Reserved for the future Auth.js migration; always null in the MVP.
+  ownerUserId String? @map("owner_user_id") @db.Uuid
+
+  canonicalUrl String     @map("canonical_url")
+  origin       String
+  platform     Platform   @default(UNKNOWN)
+  title        String?
+  status       SiteStatus @default(DRAFT)
+
+  /// The single configuration version served publicly, if any.
+  publishedConfigVersionId String?        @unique @map("published_config_version_id") @db.Uuid
+  publishedConfigVersion   ConfigVersion? @relation("SitePublishedConfig", fields: [publishedConfigVersionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  pages                 SitePage[]
+  scanRuns              ScanRun[]
+  configVersions        ConfigVersion[]        @relation("SiteConfigVersions")
+  verificationChallenge VerificationChallenge[]
+  verificationRuns      VerificationRun[]
+  aiUsageEvents         AiUsageEvent[]
+
+  @@index([createdBySessionId])
+  @@index([origin])
+  @@map("sites")
+}
+
+enum PageType {
+  HOME
+  ABOUT
+  WORK_INDEX
+  PROJECT_DETAIL
+  EXPERIENCE
+  EDUCATION
+  CONTACT
+  BLOG
+  OTHER
+
+  @@map("page_type")
+}
+
+/// One page discovered by the crawler.
+model SitePage {
+  id     String @id @default(uuid()) @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  url      String
+  pathname String
+
+  /// Normalised route shape, e.g. `/work/*`. Lets one configuration apply to
+  /// every project detail page without listing them individually.
+  routePattern String?  @map("route_pattern")
+  pageType     PageType @default(OTHER) @map("page_type")
+
+  httpStatus  Int?    @map("http_status")
+  contentType String? @map("content_type")
+  byteSize    Int?    @map("byte_size")
+  title       String?
+
+  /// True when the server-returned HTML carried almost no readable content —
+  /// the signature of a client-rendered site.
+  lowInformation Boolean @default(false) @map("low_information")
+
+  fetchedAt DateTime @default(now()) @map("fetched_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([siteId, url])
+  @@index([siteId, routePattern])
+  @@map("site_pages")
+}
+
+// ---------------------------------------------------------------------------
+// Scanning
+// ---------------------------------------------------------------------------
+
+enum ScanStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+
+  @@map("scan_status")
+}
+
+model ScanRun {
+  id     String @id @default(uuid()) @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  status       ScanStatus @default(PENDING)
+  pagesScanned Int        @default(0) @map("pages_scanned")
+  pagesFailed  Int        @default(0) @map("pages_failed")
+
+  /// Compact deterministic extraction, before any AI involvement.
+  deterministic Json?
+
+  /// Gemini's semantic interpretation, after Zod validation.
+  semantic Json?
+
+  /// Which model produced `semantic`, and whether a fallback was needed.
+  semanticModel     String?  @map("semantic_model")
+  semanticAttempts  Int      @default(0) @map("semantic_attempts")
+  semanticFellBack  Boolean  @default(false) @map("semantic_fell_back")
+
+  /// Non-fatal problems worth showing the user (blocked pages, timeouts, ...).
+  warnings Json?
+
+  /// User-safe failure summary. Never contains a stack trace.
+  errorCode    String? @map("error_code")
+  errorMessage String? @map("error_message")
+
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  aiUsageEvents AiUsageEvent[]
+
+  @@index([siteId, startedAt])
+  @@map("scan_runs")
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// An immutable snapshot of a site's runtime configuration. Publishing points
+/// `Site.publishedConfigVersionId` at one of these; the row itself never
+/// changes afterwards.
+model ConfigVersion {
+  id     String @id @default(uuid()) @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation("SiteConfigVersions", fields: [siteId], references: [id], onDelete: Cascade)
+
+  version Int
+
+  /// The exact payload the public runtime endpoint serves. Structure and
+  /// selectors only — never a copy of the portfolio's content.
+  runtimeConfig Json @map("runtime_config")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  publishedAt DateTime? @map("published_at")
+
+  publishedForSite Site?             @relation("SitePublishedConfig")
+  verificationRuns VerificationRun[]
+
+  @@unique([siteId, version])
+  @@index([siteId, createdAt])
+  @@map("config_versions")
+}
+
+// ---------------------------------------------------------------------------
+// Installation verification
+// ---------------------------------------------------------------------------
+
+/// A single-use, short-lived challenge proving the runtime really is installed
+/// on the expected origin. Only the hash is stored, so the database never holds
+/// a replayable secret.
+model VerificationChallenge {
+  id     String @id @default(uuid()) @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  challengeHash  String    @unique @map("challenge_hash")
+  expectedOrigin String    @map("expected_origin")
+  expiresAt      DateTime  @map("expires_at")
+  consumedAt     DateTime? @map("consumed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  verificationRuns VerificationRun[]
+
+  @@index([siteId, createdAt])
+  @@index([expiresAt])
+  @@map("verification_challenges")
+}
+
+enum VerificationOutcome {
+  SUCCESS
+  PARTIAL
+  FAILED
+
+  @@map("verification_outcome")
+}
+
+model VerificationRun {
+  id     String @id @default(uuid()) @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  challengeId String?                @map("challenge_id") @db.Uuid
+  challenge   VerificationChallenge? @relation(fields: [challengeId], references: [id], onDelete: SetNull)
+
+  configVersionId String?        @map("config_version_id") @db.Uuid
+  configVersion   ConfigVersion? @relation(fields: [configVersionId], references: [id], onDelete: SetNull)
+
+  runtimeVersion String? @map("runtime_version")
+  reportedOrigin String? @map("reported_origin")
+  reportedPath   String? @map("reported_path")
+
+  webmcpAvailable Boolean @default(false) @map("webmcp_available")
+  toolsRegistered Int     @default(0) @map("tools_registered")
+
+  /// Per-capability live match counts, e.g. `{ "list_projects": 8 }`. Compared
+  /// against the previous run to detect content changes and broken selectors.
+  liveCounts Json? @map("live_counts")
+
+  /// Structured, user-presentable diagnostics. No stack traces.
+  diagnostics Json?
+
+  outcome VerificationOutcome @default(FAILED)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([siteId, createdAt])
+  @@map("verification_runs")
+}
+
+// ---------------------------------------------------------------------------
+// AI accounting
+// ---------------------------------------------------------------------------
+
+enum AiPurpose {
+  SEMANTIC_MAPPING
+  NL_DEMO
+
+  @@map("ai_purpose")
+}
+
+enum AiAttemptStatus {
+  SUCCESS
+  TRANSIENT_ERROR
+  RATE_LIMITED
+  QUOTA_EXHAUSTED
+  AUTH_ERROR
+  INVALID_REQUEST
+  SCHEMA_INVALID
+  TIMEOUT
+  UNKNOWN_ERROR
+
+  @@map("ai_attempt_status")
+}
+
+/// One Gemini request attempt. Also the server-side ledger that enforces the
+/// natural-language demo question limit — a browser counter would be trivially
+/// bypassed.
+model AiUsageEvent {
+  id String @id @default(uuid()) @db.Uuid
+
+  siteId String? @map("site_id") @db.Uuid
+  site   Site?   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  scanRunId String?  @map("scan_run_id") @db.Uuid
+  scanRun   ScanRun? @relation(fields: [scanRunId], references: [id], onDelete: SetNull)
+
+  purpose AiPurpose
+  model   String
+  attempt Int             @default(1)
+  status  AiAttemptStatus
+
+  /// Coarse classification only — never the provider's raw error body.
+  errorCode String? @map("error_code")
+  latencyMs Int?    @map("latency_ms")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([siteId, purpose, createdAt])
+  @@index([scanRunId])
+  @@map("ai_usage_events")
+}

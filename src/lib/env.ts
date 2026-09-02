@@ -1,0 +1,107 @@
+import "server-only";
+
+import { z } from "zod";
+
+/**
+ * Server-only environment contract.
+ *
+ * Nothing in here may ever be imported from a Client Component: the
+ * `server-only` import above turns that mistake into a build error.
+ *
+ * Canonical variable names are documented in `.env.example`. A small alias map
+ * keeps older `.env.local` files (written before the names were finalised)
+ * working; the canonical name always wins when both are present.
+ */
+
+const ALIASES: Record<string, string> = {
+  APP_BASE_URL: "NEXT_PUBLIC_APP_URL",
+  GEMINI_SEMANTIC_PRIMARY_MODEL: "GEMINI_PRIMARY_MODEL",
+  GEMINI_SEMANTIC_FALLBACK_1_MODEL: "GEMINI_FALLBACK_MODEL_1",
+  GEMINI_SEMANTIC_FALLBACK_2_MODEL: "GEMINI_FALLBACK_MODEL_2",
+  GEMINI_NL_DEMO_MODEL: "GEMINI_PREVIEW_MODEL",
+  GEMINI_NL_DEMO_MAX_QUESTIONS: "NATURAL_LANGUAGE_DEMO_LIMIT",
+};
+
+function read(name: string): string | undefined {
+  const direct = process.env[name];
+  if (direct !== undefined && direct !== "") return direct;
+  const alias = ALIASES[name];
+  if (!alias) return undefined;
+  const aliased = process.env[alias];
+  return aliased === "" ? undefined : aliased;
+}
+
+const intFrom = (fallback: number, min: number, max: number) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? fallback : Number(v)))
+    .pipe(z.number().int().min(min).max(max));
+
+const schema = z.object({
+  DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  DIRECT_URL: z.string().min(1).optional(),
+
+  GEMINI_API_KEY: z.string().min(1).optional(),
+  GEMINI_SEMANTIC_PRIMARY_MODEL: z.string().min(1).default("gemini-3.7-flash"),
+  GEMINI_SEMANTIC_FALLBACK_1_MODEL: z
+    .string()
+    .min(1)
+    .default("gemini-3.5-flash-lite"),
+  GEMINI_SEMANTIC_FALLBACK_2_MODEL: z
+    .string()
+    .min(1)
+    .default("gemini-3.1-flash-lite"),
+  GEMINI_NL_DEMO_MODEL: z.string().min(1).default("gemini-3.5-flash-lite"),
+  GEMINI_NL_DEMO_MAX_QUESTIONS: intFrom(3, 0, 100),
+  GEMINI_MAX_RETRIES_PER_MODEL: intFrom(1, 0, 3),
+  GEMINI_REQUEST_TIMEOUT_MS: intFrom(20_000, 1_000, 120_000),
+
+  APP_BASE_URL: z.url().default("http://localhost:3000"),
+
+  SCAN_MAX_PAGES: intFrom(10, 1, 50),
+  SCAN_REQUEST_TIMEOUT_MS: intFrom(10_000, 1_000, 60_000),
+  SCAN_MAX_HTML_BYTES: intFrom(2_000_000, 10_000, 20_000_000),
+  SCAN_MAX_REDIRECTS: intFrom(3, 0, 10),
+  SCAN_MAX_PER_SESSION_PER_HOUR: intFrom(10, 1, 1000),
+
+  VERIFICATION_CHALLENGE_TTL_SECONDS: intFrom(300, 30, 3600),
+});
+
+export type Env = z.infer<typeof schema>;
+
+let cached: Env | undefined;
+
+/**
+ * Parses and caches the environment. Throws a message that names the offending
+ * variables but never echoes their values.
+ */
+export function getEnv(): Env {
+  if (cached) return cached;
+
+  const raw: Record<string, string | undefined> = {};
+  for (const key of Object.keys(schema.shape)) raw[key] = read(key);
+
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    const names = [
+      ...new Set(parsed.error.issues.map((i) => i.path.join(".") || "(root)")),
+    ];
+    throw new Error(
+      `Invalid environment configuration. Check these variables in .env.local: ${names.join(", ")}`,
+    );
+  }
+
+  cached = parsed.data;
+  return cached;
+}
+
+/** True when Gemini is configured. Semantic mapping degrades without it. */
+export function hasGeminiKey(): boolean {
+  return Boolean(read("GEMINI_API_KEY"));
+}
+
+/** The origin (scheme + host + port) this deployment is served from. */
+export function appOrigin(): string {
+  return new URL(getEnv().APP_BASE_URL).origin;
+}

@@ -132,6 +132,12 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
           platform: site.platform,
           configVersion: publishedVersion.version,
           publishedAt: publishedVersion.publishedAt?.toISOString() ?? null,
+          needsRegeneration: Boolean(
+            scan?.finishedAt &&
+              (scan.status === "SUCCEEDED" || scan.status === "PARTIAL") &&
+              publishedVersion.publishedAt &&
+              scan.finishedAt > publishedVersion.publishedAt,
+          ),
         }
       : null,
     verification,

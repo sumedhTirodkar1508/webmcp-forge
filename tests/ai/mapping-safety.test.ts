@@ -265,4 +265,102 @@ describe("resolveMapping", () => {
 
     expect(resolved.mapping.navigation?.items).toEqual([{ label: "Work", path: "/work" }]);
   });
+
+  it("preserves a scanned same-page fragment navigation target", () => {
+    const rep = representation();
+    rep.navigation = [
+      {
+        label: "Work",
+        href: "https://x.test/work#projects",
+        pathname: "/work",
+        path: "/work#projects",
+      },
+    ];
+    const resolved = resolveMapping(rep, {
+      platformGuess: "CUSTOM",
+      navigation: [],
+      warnings: [],
+    });
+
+    expect(resolved.mapping.navigation?.items).toEqual([
+      { label: "Work", path: "/work#projects" },
+    ]);
+  });
+
+  it("uses exact heading selectors and rejects profile fields from a repeated collection", () => {
+    const rep = representation();
+    rep.pages = [
+      page({
+        url: "https://x.test/",
+        pathname: "/",
+        routePattern: "/",
+        pageType: "HOME",
+        headings: [
+          { level: 1, text: "Ada Example", selector: "#hero-title" },
+          { level: 2, text: "Selected work", selector: "#work-heading" },
+        ],
+        sections: [
+          { selector: "#intro", text: "Personal introduction", repeatedItemCount: 0 },
+          {
+            selector: "#work",
+            heading: "Selected work",
+            text: "A large collection of projects",
+            repeatedItemCount: 4,
+          },
+        ],
+      }),
+    ];
+    const resolved = resolveMapping(rep, {
+      platformGuess: "CUSTOM",
+      profile: {
+        pageUrl: "https://x.test/",
+        nameHeadingIndex: 0,
+        headlineHeadingIndex: 1,
+        bioSectionIndex: 1,
+        confidence: 0.8,
+      },
+      navigation: [],
+      warnings: [],
+    });
+
+    expect(resolved.mapping.profile?.fields).toEqual({
+      name: { selector: "#hero-title", source: "text" },
+    });
+    expect(resolved.warnings.join(" ")).toContain("repeated content collection");
+  });
+
+  it("fills omitted semantic roles only from scanner-owned field candidates", () => {
+    const rep = representation();
+    rep.pages[0]!.repeatedGroups[0] = {
+      id: "g1",
+      itemSelector: "#education > ol > li",
+      count: 2,
+      fields: {
+        title: { selector: "h3", source: "text", coverage: 1, samples: ["MSc"], hints: ["heading"] },
+        description: { selector: "p", source: "text", coverage: 1, samples: ["Computing"], hints: ["prose"] },
+        dateText: { selector: "time", source: "text", coverage: 1, samples: ["2024"], hints: ["date", "visible time"] },
+        f1: { selector: "span:nth-of-type(1)", source: "text", coverage: 1, samples: ["Example University"], hints: ["inline text", "first value"] },
+      },
+      samples: ["MSc Example University"],
+      score: 1,
+    };
+    const resolved = resolveMapping(rep, {
+      platformGuess: "CUSTOM",
+      education: {
+        pageUrl: "https://x.test/work",
+        groupId: "g1",
+        fields: { degree: "title" },
+        confidence: 0.8,
+      },
+      navigation: [],
+      warnings: [],
+    });
+
+    expect(resolved.mapping.education?.fields).toEqual({
+      degree: { selector: "h3", source: "text" },
+      institution: { selector: "span:nth-of-type(1)", source: "text" },
+      dates: { selector: "time", source: "text" },
+      summary: { selector: "p", source: "text" },
+    });
+  });
 });

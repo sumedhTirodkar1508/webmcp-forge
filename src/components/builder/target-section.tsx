@@ -23,6 +23,7 @@ export function TargetSection() {
   // matches it (i.e. it changed because of what we typed) is not a re-sync.
   const [value, setValue] = useState(state.targetUrl ?? "");
   const lastSynced = useRef(state.targetUrl ?? "");
+  const submitInFlight = useRef(false);
 
   useEffect(() => {
     const incoming = state.targetUrl ?? "";
@@ -37,14 +38,17 @@ export function TargetSection() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || submitInFlight.current) return;
     const trimmed = value.trim();
     if (!trimmed) return;
+    submitInFlight.current = true;
     try {
       await actions.setTargetUrl(trimmed);
       await actions.scan();
     } catch {
       // The error is already surfaced through `error` in context.
+    } finally {
+      submitInFlight.current = false;
     }
   }
 

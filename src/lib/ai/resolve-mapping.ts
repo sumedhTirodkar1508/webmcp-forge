@@ -61,19 +61,6 @@ function toFieldMapping(group: RepeatedGroup, fieldName: string): FieldMapping |
   };
 }
 
-/** Picks the named candidate fields off a group, skipping any that are absent. */
-function collectFields(
-  group: RepeatedGroup,
-  roles: readonly string[],
-): Record<string, FieldMapping> {
-  const fields: Record<string, FieldMapping> = {};
-  for (const role of roles) {
-    const mapping = toFieldMapping(group, role);
-    if (mapping) fields[role] = mapping;
-  }
-  return fields;
-}
-
 /** Builds a list mapping from a model selection, or returns undefined. */
 function resolveList(
   representation: ScanRepresentation,
@@ -100,6 +87,50 @@ function resolveList(
     if (!fieldName) continue;
     const mapping = toFieldMapping(group, fieldName);
     if (mapping) fields[role] = mapping;
+  }
+
+  const findField = (
+    preferredNames: string[],
+    requiredHints: string[] = [],
+  ): string | undefined =>
+    preferredNames.find((name) => Boolean(group.fields[name])) ??
+    Object.entries(group.fields).find(([, field]) =>
+      requiredHints.every((hint) => field.hints?.includes(hint)),
+    )?.[0];
+  const addFallback = (
+    role: string,
+    preferredNames: string[],
+    requiredHints: string[] = [],
+  ) => {
+    if (fields[role]) return;
+    const fieldName = findField(preferredNames, requiredHints);
+    if (!fieldName) return;
+    const mapping = toFieldMapping(group, fieldName);
+    if (mapping) fields[role] = mapping;
+  };
+
+  // Once the model has safely selected the semantic group, fill omitted roles
+  // from scanner-owned structural hints. Structured output models often leave
+  // optional fields blank even when the candidate is unambiguous.
+  if (label === "projects") {
+    addFallback("title", ["title"], ["heading"]);
+    addFallback("description", ["f2", "description"], ["prose"]);
+    addFallback("link", ["link"], ["link"]);
+    addFallback("image", ["image"], ["image"]);
+    addFallback("tags", ["nestedList"], ["nested list"]);
+  } else if (label === "skills") {
+    addFallback("category", ["title"], ["heading"]);
+    addFallback("items", ["nestedList"], ["nested list"]);
+  } else if (label === "experience") {
+    addFallback("role", ["title"], ["heading"]);
+    addFallback("organization", [], ["inline text", "first value"]);
+    addFallback("dates", ["date", "dateText"], ["date"]);
+    addFallback("summary", ["description"], ["prose"]);
+  } else if (label === "education") {
+    addFallback("degree", ["title"], ["heading"]);
+    addFallback("institution", [], ["inline text", "first value"]);
+    addFallback("dates", ["date", "dateText"], ["date"]);
+    addFallback("summary", ["description"], ["prose"]);
   }
 
   if (Object.keys(fields).length === 0) {
@@ -136,9 +167,7 @@ function resolveProfile(
     if (index === undefined) return undefined;
     const heading = page.headings[index];
     if (!heading) return undefined;
-    // Selectors are positional over our own extracted heading order, which is
-    // document order for h1..h4 — stable enough to re-find on the live page.
-    return `h1, h2, h3, h4`;
+    return heading.selector;
   };
 
   const nameHeading = selection.nameHeadingIndex;
@@ -149,12 +178,33 @@ function resolveProfile(
     }
   }
 
+  const headlineHeading = selection.headlineHeadingIndex;
+  if (headlineHeading !== undefined && page.headings[headlineHeading]) {
+    const chosen = page.headings[headlineHeading];
+    const belongsToCollection = page.sections.some(
+      (candidate) =>
+        candidate.heading === chosen.text && (candidate.repeatedItemCount ?? 0) >= 4,
+    );
+    const selector = belongsToCollection ? undefined : headingSelector(headlineHeading);
+    if (selector && selector !== fields.name?.selector) {
+      fields.headline = { selector, source: "text" };
+    }
+    if (belongsToCollection) {
+      warnings.push("The selected profile headline belonged to a repeated content collection and was skipped.");
+    }
+  }
+
   const section =
     selection.bioSectionIndex !== undefined
       ? page.sections[selection.bioSectionIndex]
       : undefined;
-  if (section) {
+  // Large repeated collections are never a person's biography. This scanner-
+  // owned guard catches a bad semantic selection without relying on English
+  // section names.
+  if (section && (section.repeatedItemCount ?? 0) < 4) {
     fields.bio = { selector: section.selector, source: "text" };
+  } else if (section) {
+    warnings.push("The selected profile biography was a repeated content collection and was skipped.");
   }
 
   if (Object.keys(fields).length === 0) {
@@ -172,7 +222,7 @@ function resolveNavigation(
 ): SiteMapping["navigation"] {
   const seenPaths = new Set(
     representation.navigation
-      .map((entry) => entry.pathname)
+      .map((entry) => entry.path ?? entry.pathname)
       .filter((path): path is string => Boolean(path)),
   );
   for (const page of representation.pages) seenPaths.add(page.pathname);
@@ -192,9 +242,10 @@ function resolveNavigation(
   // model returned nothing usable.
   if (items.length === 0) {
     for (const entry of representation.navigation) {
-      if (!entry.pathname || used.has(entry.pathname)) continue;
-      used.add(entry.pathname);
-      items.push({ label: entry.label, path: entry.pathname });
+      const path = entry.path ?? entry.pathname;
+      if (!entry.label.trim() || !path || used.has(path)) continue;
+      used.add(path);
+      items.push({ label: entry.label, path });
       if (items.length >= 12) break;
     }
   }
@@ -307,21 +358,142 @@ export function deriveHeuristicMapping(
     representation.pages.find((page) => page.pageType === "WORK_INDEX") ??
     representation.pages.find((page) => page.pageType === "HOME");
 
-  const bestGroup = (page: PageExtraction | undefined, minCount: number) =>
-    page?.repeatedGroups.find((group) => group.count >= minCount && "title" in group.fields);
+  const allGroups = representation.pages.flatMap((page) =>
+    page.repeatedGroups.map((group) => ({ page, group })),
+  );
+  const contextText = (group: RepeatedGroup) =>
+    [group.context?.sectionId, group.context?.ariaLabel, group.context?.heading]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+  const fallbackFieldName = (
+    group: RepeatedGroup,
+    preferredNames: string[],
+    requiredHints: string[] = [],
+  ) =>
+    preferredNames.find((name) => Boolean(group.fields[name])) ??
+    Object.entries(group.fields).find(([, field]) =>
+      requiredHints.every((hint) => field.hints?.includes(hint)),
+    )?.[0];
+  const pick = (pattern: RegExp, structural: (group: RepeatedGroup) => boolean) =>
+    allGroups.find(({ group }) => pattern.test(contextText(group)) && structural(group)) ??
+    allGroups.find(({ group }) => structural(group));
 
-  const projectGroup = bestGroup(workPage, 2);
+  const projectCandidate = pick(
+    /(project|work|portfolio|case.?stud|projet|proyecto|arbeit)/i,
+    (group) =>
+      group.count >= 2 &&
+      Boolean(group.fields.title) &&
+      Boolean(group.fields.link || group.fields.image),
+  );
+  const projectGroup = projectCandidate?.group;
+  const projectPage = projectCandidate?.page ?? workPage;
   const projects: ListMapping | undefined =
-    workPage && projectGroup
+    projectPage && projectGroup
       ? {
-          route: workPage.routePattern,
+          route: projectPage.routePattern,
           itemSelector: projectGroup.itemSelector,
           ...(projectGroup.containerSelector
             ? { containerSelector: projectGroup.containerSelector }
             : {}),
-          fields: collectFields(projectGroup, ["title", "description", "link", "image"]),
+          fields: Object.fromEntries(
+            Object.entries({
+              title: fallbackFieldName(projectGroup, ["title"], ["heading"]),
+              description: fallbackFieldName(projectGroup, ["f2", "description"], ["prose"]),
+              link: fallbackFieldName(projectGroup, ["link"], ["link"]),
+              image: fallbackFieldName(projectGroup, ["image"], ["image"]),
+              tags: fallbackFieldName(projectGroup, ["nestedList"], ["nested list"]),
+            }).flatMap(([role, fieldName]) => {
+              if (!fieldName) return [];
+              const mapping = toFieldMapping(projectGroup, fieldName);
+              return mapping ? [[role, mapping]] : [];
+            }),
+          ),
           expectedCount: projectGroup.count,
         }
+      : undefined;
+
+  const skillCandidate = pick(
+    /(skill|stack|capabilit|technolog|comp.tence|habilidad)/i,
+    (group) =>
+      group.count >= 2 && Boolean(group.fields.title) && Boolean(group.fields.nestedList),
+  );
+  const experienceCandidate = pick(
+    /(experience|career|employment|work.?history|exp.rience|erfahrung)/i,
+    (group) =>
+      group.count >= 2 &&
+      Boolean(group.fields.title) &&
+      Boolean(group.fields.date || group.fields.dateText),
+  );
+  const educationCandidate = pick(
+    /(education|academic|degree|school|universit|formation|ausbildung)/i,
+    (group) =>
+      group.count >= 2 &&
+      Boolean(group.fields.title) &&
+      Boolean(group.fields.date || group.fields.dateText) &&
+      group !== experienceCandidate?.group,
+  );
+
+  const makeList = (
+    candidate: (typeof allGroups)[number] | undefined,
+    roles: Record<string, string | undefined>,
+  ): ListMapping | undefined => {
+    if (!candidate) return undefined;
+    const fields: Record<string, FieldMapping> = {};
+    for (const [role, fieldName] of Object.entries(roles)) {
+      if (!fieldName) continue;
+      const field = toFieldMapping(candidate.group, fieldName);
+      if (field) fields[role] = field;
+    }
+    if (Object.keys(fields).length === 0) return undefined;
+    return {
+      route: candidate.page.routePattern,
+      itemSelector: candidate.group.itemSelector,
+      ...(candidate.group.containerSelector
+        ? { containerSelector: candidate.group.containerSelector }
+        : {}),
+      fields,
+      expectedCount: candidate.group.count,
+    };
+  };
+
+  const skills = makeList(skillCandidate, { category: "title", items: "nestedList" });
+  const experience = makeList(experienceCandidate, {
+    role: "title",
+    organization: experienceCandidate
+      ? fallbackFieldName(experienceCandidate.group, [], ["inline text", "first value"])
+      : undefined,
+    dates: experienceCandidate?.group.fields.date ? "date" : "dateText",
+    summary: "description",
+  });
+  const education = makeList(educationCandidate, {
+    degree: "title",
+    institution: educationCandidate
+      ? fallbackFieldName(educationCandidate.group, [], ["inline text", "first value"])
+      : undefined,
+    dates: educationCandidate?.group.fields.date ? "date" : "dateText",
+    summary: "description",
+  });
+
+  const profilePage = representation.pages.find((page) => page.headings.some((h) => h.level === 1));
+  const profileHeadingIndex = profilePage?.headings.findIndex((heading) => heading.level === 1);
+  const profileSectionIndex = profilePage?.sections.findIndex(
+    (section) => (section.repeatedItemCount ?? 0) < 4,
+  );
+  const profile =
+    profilePage && profileHeadingIndex !== undefined && profileHeadingIndex >= 0
+      ? resolveProfile(
+          representation,
+          {
+            pageUrl: profilePage.url,
+            nameHeadingIndex: profileHeadingIndex,
+            ...(profileSectionIndex !== undefined && profileSectionIndex >= 0
+              ? { bioSectionIndex: profileSectionIndex }
+              : {}),
+            confidence: 0.4,
+          },
+          warnings,
+        )
       : undefined;
 
   if (!projects) {
@@ -330,7 +502,11 @@ export function deriveHeuristicMapping(
 
   const draft: SiteMapping = {
     version: 1,
+    ...(profile ? { profile } : {}),
     ...(projects ? { projects } : {}),
+    ...(skills ? { skills } : {}),
+    ...(experience ? { experience } : {}),
+    ...(education ? { education } : {}),
     ...(resolveContact(representation, undefined)
       ? { contact: resolveContact(representation, undefined) }
       : {}),

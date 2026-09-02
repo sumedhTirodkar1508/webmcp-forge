@@ -345,6 +345,65 @@ describe("runModelChain", () => {
     expect(result.attempts[0]!.status).toBe("TIMEOUT");
   }, 2000);
 
+  it("falls back immediately after a timeout without retrying or sleeping", async () => {
+    const call = vi.fn(async (model: string) => {
+      if (model === "model-a") {
+        const error = new Error("timed out");
+        error.name = "TimeoutError";
+        throw error;
+      }
+      return { text: "fallback succeeded" };
+    });
+    const { sleep } = trackingSleep();
+
+    const result = await runModelChain({
+      models: ["model-a", "model-b"],
+      call,
+      validate: okValidate,
+      timeoutMs: 1000,
+      maxRetriesPerModel: 2,
+      sleep,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected success");
+    expect(call.mock.calls.map((args) => args[0])).toEqual(["model-a", "model-b"]);
+    expect(result.attempts.map((attempt) => attempt.status)).toEqual(["TIMEOUT", "SUCCESS"]);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("uses the shorter timeout budget for fallback models", async () => {
+    const abortedAt: string[] = [];
+    const call = vi.fn(
+      (model: string, signal: AbortSignal) =>
+        new Promise<unknown>((resolve, reject) => {
+          if (model === "model-c") {
+            resolve({ text: "ok" });
+            return;
+          }
+          signal.addEventListener("abort", () => {
+            abortedAt.push(model);
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          });
+        }),
+    );
+    const started = Date.now();
+    const result = await runModelChain({
+      models: MODELS,
+      call,
+      validate: okValidate,
+      timeoutMs: 30,
+      fallbackTimeoutMs: 5,
+      sleep: trackingSleep().sleep,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(abortedAt).toEqual(["model-a", "model-b"]);
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
   it("never exceeds 3 attempts for a single model and 3*models.length overall", async () => {
     // Alternates schema-invalid then transient-error style failures to probe
     // that corrective + transient retries can't compound past the bound.

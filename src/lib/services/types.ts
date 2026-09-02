@@ -54,6 +54,8 @@ export interface InstallationState {
   platform: PlatformId;
   configVersion: number | null;
   publishedAt: string | null;
+  /** A newer successful scan exists than the published configuration. */
+  needsRegeneration?: boolean;
 }
 
 export interface VerificationDiagnostic {

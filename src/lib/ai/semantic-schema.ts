@@ -71,6 +71,8 @@ export const semanticResultSchema = z.object({
 
   skills: listSelection({
     name: fieldRef.optional(),
+    category: fieldRef.optional(),
+    items: fieldRef.optional(),
   }).optional(),
 
   experience: listSelection({

@@ -89,6 +89,10 @@ export async function interpretScan(
   const result = await runModelChain<SemanticResult>({
     models: modelChain(),
     timeoutMs: env.GEMINI_REQUEST_TIMEOUT_MS,
+    // Backup flash models normally answer in a couple of seconds. Capping
+    // each fallback prevents a primary timeout from turning into a minute-long
+    // scan while retaining the deterministic heuristic as the final safety net.
+    fallbackTimeoutMs: Math.min(5_000, env.GEMINI_REQUEST_TIMEOUT_MS),
     maxRetriesPerModel: env.GEMINI_MAX_RETRIES_PER_MODEL,
     onAttempt: options.onAttempt,
     call: async (model, signal) => {

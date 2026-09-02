@@ -14,9 +14,9 @@ import type { PageExtraction, ScanRepresentation } from "@/lib/scanner/types";
  */
 
 const MAX_PAGES = 8;
-const MAX_GROUPS_PER_PAGE = 6;
+const MAX_GROUPS_PER_PAGE = 12;
 const MAX_HEADINGS = 20;
-const MAX_SECTIONS = 6;
+const MAX_SECTIONS = 12;
 const MAX_SAMPLES = 2;
 const SECTION_PREVIEW = 240;
 
@@ -40,17 +40,26 @@ function compactPage(page: PageExtraction) {
     sections: page.sections.slice(0, MAX_SECTIONS).map((section, index) => ({
       index,
       heading: section.heading ? trim(section.heading, 120) : undefined,
+      sectionId: section.id,
+      ariaLabel: section.ariaLabel,
+      landmark: section.landmark,
+      documentOrder: section.documentOrder,
+      repeatedItemCount: section.repeatedItemCount,
       preview: trim(section.text, SECTION_PREVIEW),
     })),
     candidateGroups: page.repeatedGroups.slice(0, MAX_GROUPS_PER_PAGE).map((group) => ({
       id: group.id,
       count: group.count,
+      context: group.context,
       // Field NAMES are what the model must choose among. Selectors are
       // deliberately not shown: the model has no reason to see them and no
       // ability to invent them.
       fields: Object.entries(group.fields).map(([name, field]) => ({
         name,
+        source: field.source,
+        attribute: field.attribute,
         coverage: Number(field.coverage.toFixed(2)),
+        hints: field.hints,
         samples: field.samples.slice(0, MAX_SAMPLES).map((s) => trim(s, 120)),
       })),
       samples: group.samples.slice(0, MAX_SAMPLES).map((s) => trim(s, 160)),
@@ -70,7 +79,10 @@ export function buildPromptInput(representation: ScanRepresentation) {
     routePatterns: representation.routePatterns,
     navigation: representation.navigation
       .slice(0, 20)
-      .map((entry) => ({ label: trim(entry.label, 80), path: entry.pathname ?? entry.href })),
+      .map((entry) => ({
+        label: trim(entry.label, 80),
+        path: entry.path ?? entry.pathname ?? entry.href,
+      })),
     pages: representation.pages.slice(0, MAX_PAGES).map(compactPage),
   };
 }
@@ -86,6 +98,9 @@ Rules you must follow:
 - Field values must be one of the "name" values listed for that group. Do not invent field names.
 - Do not invent, guess at, or output CSS selectors, code, or markup of any kind. You are choosing among options, not authoring anything.
 - Prefer the group that most plausibly represents real content. A navigation menu, a footer link list, or a cookie banner is not a project list.
+- Use each group's semantic context, field hints, coverage, and samples together. Identical list markup can represent very different sections.
+- For profile bio, choose personal/about/introductory prose. Never use a work, projects, experience, skills, education, or contact collection as the person's bio. Prefer an early prose section without a large repeated collection.
+- Skills may be represented as category cards. In that case map the category heading and nested-list values rather than omitting skills.
 - A group with 1 item is rarely a real list. Prefer groups with 3 or more items.
 - If a section genuinely does not exist on this site, omit it. Do not force a match. Add a short note to "warnings" saying what was missing.
 - Confidence must reflect real uncertainty: use below 0.5 when you are guessing.

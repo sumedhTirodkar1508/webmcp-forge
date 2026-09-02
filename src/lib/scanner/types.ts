@@ -36,13 +36,17 @@ export type PageTypeId =
 export interface Heading {
   level: number;
   text: string;
+  /** Scanner-owned selector for this exact heading when one is available. */
+  selector?: string;
 }
 
 export interface NavLink {
   label: string;
   href: string;
-  /** Same-origin path, when the href resolved to this site. */
+  /** Same-origin crawl identity (query/hash removed). */
   pathname?: string;
+  /** Same-origin navigation target, including query and fragment. */
+  path?: string;
 }
 
 /** A field discovered inside every item of a repeated structure. */
@@ -57,6 +61,17 @@ export interface RepeatedField {
   coverage: number;
   /** A few real values, truncated. Used only to help the model judge meaning. */
   samples: string[];
+  /** Structural hints for semantic interpretation; never executable. */
+  hints?: string[];
+}
+
+export interface RepeatedGroupContext {
+  sectionSelector?: string;
+  sectionId?: string;
+  heading?: string;
+  ariaLabel?: string;
+  landmark?: string;
+  documentOrder?: number;
 }
 
 /**
@@ -79,6 +94,8 @@ export interface RepeatedGroup {
   samples: string[];
   /** Rough score used to order candidates; higher looks more content-like. */
   score: number;
+  /** Nearby semantic context used to distinguish otherwise similar lists. */
+  context?: RepeatedGroupContext;
 }
 
 /** A run of prose under a heading — the raw material for profile/about text. */
@@ -88,6 +105,11 @@ export interface PageSection {
   selector: string;
   /** Truncated text. */
   text: string;
+  id?: string;
+  ariaLabel?: string;
+  landmark?: string;
+  documentOrder?: number;
+  repeatedItemCount?: number;
 }
 
 export interface ContactSignals {

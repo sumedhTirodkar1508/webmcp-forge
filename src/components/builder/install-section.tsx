@@ -187,6 +187,24 @@ export function InstallSection() {
 
         {installation && instructions && (
           <div className="flex flex-col gap-4">
+            {installation.needsRegeneration && (
+              <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                <p className="font-medium text-foreground">Your scan is newer than this configuration.</p>
+                <p className="mt-1 text-muted-foreground">
+                  Regenerate to publish the latest selectors and capability recommendations. The script tag on your site will not change.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-3"
+                  onClick={() => void actions.generateInstallation()}
+                  disabled={generating}
+                >
+                  {generating && <Loader2Icon className="animate-spin" />}
+                  {generating ? "Regenerating…" : "Regenerate configuration"}
+                </Button>
+              </div>
+            )}
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Your script tag</span>

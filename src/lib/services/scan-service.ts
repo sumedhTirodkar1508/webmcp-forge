@@ -133,6 +133,13 @@ export async function scanSite(
               title: page.title,
               lowInformation: page.lowInformation,
               groupCount: page.repeatedGroups.length,
+              groups: page.repeatedGroups.slice(0, 12).map((group) => ({
+                id: group.id,
+                count: group.count,
+                sectionId: group.context?.sectionId,
+                heading: group.context?.heading,
+                fields: Object.keys(group.fields).slice(0, 16),
+              })),
             })),
           }),
           semantic: asJson({

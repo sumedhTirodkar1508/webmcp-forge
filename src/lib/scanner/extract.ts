@@ -86,7 +86,7 @@ const LOW_INFO_TEXT_LEN = 400;
 const LOW_INFO_HEADING_COUNT = 3;
 const MAX_FLAT_ELEMENTS = 20000;
 const MAX_CHILDREN_PER_CONTAINER = 2000;
-const MIN_GROUP_MEMBERS = 3;
+const MIN_GROUP_MEMBERS = 2;
 
 // ---------------------------------------------------------------------------
 // Small utilities.
@@ -253,7 +253,17 @@ function collectHeadings($: CheerioAPI): Heading[] {
     if (!match) continue;
     const text = collapse($(el).text());
     if (!text) continue;
-    headings.push({ level: Number(match[1]), text: truncate(text, HEADING_TEXT_MAX) });
+    const id = $(el).attr("id");
+    const selector = id
+      ? `#${cssIdentEscape(id)}`
+      : $(tag).length === 1
+        ? tag
+        : undefined;
+    headings.push({
+      level: Number(match[1]),
+      text: truncate(text, HEADING_TEXT_MAX),
+      ...(selector ? { selector } : {}),
+    });
     if (headings.length >= MAX_HEADINGS) break;
   }
   return headings;
@@ -271,7 +281,6 @@ function collectNav($: CheerioAPI, options: ExtractOptions): NavLink[] {
     if (!href || isSkippableHref(href)) return;
     const resolved = resolveUrl(href, options.url);
     if (!resolved) return;
-    resolved.hash = "";
     const finalHref = resolved.toString();
     if (seen.has(finalHref)) return;
     seen.add(finalHref);
@@ -280,6 +289,7 @@ function collectNav($: CheerioAPI, options: ExtractOptions): NavLink[] {
     const navLink: NavLink = { label, href: finalHref };
     if (resolved.origin === options.origin) {
       navLink.pathname = resolved.pathname;
+      navLink.path = `${resolved.pathname}${resolved.search}${resolved.hash}`;
     }
     result.push(navLink);
   });
@@ -310,28 +320,6 @@ function collectLinks($: CheerioAPI, options: ExtractOptions): NavLink[] {
   return result;
 }
 
-function buildDisplaySelector($: CheerioAPI, el: CheerioElement): string {
-  const tag = el.tagName.toLowerCase();
-  const id = $(el).attr("id");
-  if (id) return `#${cssIdentEscape(id)}`;
-
-  const classes = readableClasses($(el).attr("class"));
-  if (classes.length > 0) return `${tag}.${cssIdentEscape(classes[0])}`;
-
-  const parent = el.parent;
-  if (parent && parent.type === "tag") {
-    const parentId = $(parent).attr("id");
-    if (parentId) return `#${cssIdentEscape(parentId)} > ${tag}`;
-    const parentClasses = readableClasses($(parent).attr("class"));
-    if (parentClasses.length > 0) {
-      return `.${cssIdentEscape(parentClasses[0])} > ${tag}`;
-    }
-    return `${parent.tagName.toLowerCase()} > ${tag}`;
-  }
-
-  return tag;
-}
-
 function collectSections($: CheerioAPI): PageSection[] {
   const flat = $.root().find("*").toArray();
   const orderIndex = new Map<CheerioElement, number>();
@@ -360,21 +348,38 @@ function collectSections($: CheerioAPI): PageSection[] {
   };
 
   const candidates = $("section, article, main > div").toArray();
-  const scored: Array<{ section: PageSection; len: number }> = [];
+  const scored: Array<{ section: PageSection; importance: number }> = [];
   for (const el of candidates) {
     const text = collapse($(el).text());
     if (text.length < MIN_SECTION_TEXT_LEN) continue;
+    const id = $(el).attr("id") || undefined;
+    const ariaLabel = $(el).attr("aria-label")?.trim() || undefined;
+    const tag = el.tagName.toLowerCase();
     scored.push({
       section: {
         heading: nearestHeadingFor(el),
-        selector: buildDisplaySelector($, el),
+        selector: buildExactSelector($, el),
         text: truncate(text, SECTION_TEXT_MAX),
+        ...(id ? { id } : {}),
+        ...(ariaLabel ? { ariaLabel } : {}),
+        landmark: tag,
+        documentOrder: orderIndex.get(el) ?? 0,
       },
-      len: text.length,
+      importance:
+        (tag === "section" ? 4000 : tag === "article" ? 2000 : 1000) +
+        (id ? 1500 : 0) +
+        (ariaLabel ? 500 : 0) +
+        Math.min(text.length, 1000),
     });
   }
-  scored.sort((a, b) => b.len - a.len);
-  return scored.slice(0, MAX_SECTIONS).map((s) => s.section);
+  return scored
+    .sort((a, b) => b.importance - a.importance)
+    .slice(0, MAX_SECTIONS)
+    .sort(
+      (a, b) =>
+        (a.section.documentOrder ?? 0) - (b.section.documentOrder ?? 0),
+    )
+    .map((s) => s.section);
 }
 
 function collectContact($: CheerioAPI, options: ExtractOptions): ContactSignals {
@@ -447,8 +452,11 @@ function findCandidateGroups($: CheerioAPI): CandidateGroup[] {
       const text = collapse($(child).text());
       if (text.length === 0) continue;
       const tag = child.tagName.toLowerCase();
-      const classes = readableClasses($(child).attr("class")).sort();
-      const signature = `${tag}|${classes.join(".")}`;
+      // Component frameworks frequently hash every class name. The useful
+      // invariant is the sibling topology: like-tagged children of one
+      // container. Field coverage below confirms that they share a useful
+      // internal shape before a group is accepted.
+      const signature = tag;
       const arr = bySignature.get(signature) ?? [];
       arr.push(child);
       bySignature.set(signature, arr);
@@ -456,8 +464,29 @@ function findCandidateGroups($: CheerioAPI): CandidateGroup[] {
 
     for (const [signature, members] of bySignature) {
       if (members.length < MIN_GROUP_MEMBERS) continue;
-      const classPart = signature.split("|")[1] ?? "";
-      const readableClassesShared = classPart.length > 0 ? classPart.split(".") : [];
+      // Page-level sections are layout, not a content collection. Their inner
+      // lists are considered independently and carry much stronger context.
+      if (
+        (container.tagName.toLowerCase() === "main" ||
+          container.tagName.toLowerCase() === "body") &&
+        signature === "section"
+      ) {
+        continue;
+      }
+      // Two-column wrappers inside a single card/timeline item describe
+      // layout, not another collection. The surrounding sibling list is the
+      // meaningful repeated structure.
+      if (
+        (container.tagName.toLowerCase() === "article" ||
+          container.tagName.toLowerCase() === "li") &&
+        (signature === "div" || signature === "span")
+      ) {
+        continue;
+      }
+      const readableClassesShared = members.reduce<string[]>((shared, member, index) => {
+        const classes = readableClasses($(member).attr("class"));
+        return index === 0 ? classes : shared.filter((name) => classes.includes(name));
+      }, []);
       candidates.push({ container, members, readableClassesShared });
     }
   }
@@ -470,7 +499,11 @@ function sharedDataAttribute(
 ): string | undefined {
   if (members.length === 0) return undefined;
   const firstAttribs = members[0].attribs;
-  const dataKeys = Object.keys(firstAttribs).filter((k) => k.startsWith("data-"));
+  const dataKeys = Object.keys(firstAttribs).filter(
+    (k) =>
+      k.startsWith("data-") &&
+      !/^data-(framer|react|next|w-|test)/i.test(k),
+  );
   for (const key of dataKeys) {
     const allHave = members.every((m) =>
       Object.prototype.hasOwnProperty.call(m.attribs, key),
@@ -488,6 +521,92 @@ function stableSelfSelector($: CheerioAPI, el: CheerioElement): string {
   return el.tagName.toLowerCase();
 }
 
+function sameElements(actual: CheerioElement[], expected: CheerioElement[]): boolean {
+  return actual.length === expected.length && actual.every((el, i) => el === expected[i]);
+}
+
+function selectorMatchesExactly(
+  $: CheerioAPI,
+  selector: string,
+  expected: CheerioElement[],
+): boolean {
+  try {
+    const actual = $(selector)
+      .toArray()
+      .filter((node): node is CheerioElement => node.type === "tag");
+    return sameElements(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function stableAnchorSelector(
+  $: CheerioAPI,
+  el: CheerioElement,
+): string | undefined {
+  const id = $(el).attr("id");
+  if (id) return `#${cssIdentEscape(id)}`;
+
+  const ariaLabel = $(el).attr("aria-label")?.trim();
+  if (ariaLabel && /^[\w .:/-]{1,120}$/.test(ariaLabel)) {
+    const candidate = `[aria-label="${ariaLabel}"]`;
+    if ($(candidate).length === 1) return candidate;
+  }
+
+  const classes = readableClasses($(el).attr("class"));
+  for (const className of classes) {
+    const candidate = `.${cssIdentEscape(className)}`;
+    if ($(candidate).length === 1) return candidate;
+  }
+  return undefined;
+}
+
+function nearestStableAnchor(
+  $: CheerioAPI,
+  el: CheerioElement,
+): { element: CheerioElement; selector: string } {
+  let current: CheerioElement | undefined = el;
+  while (current) {
+    const selector = stableAnchorSelector($, current);
+    if (selector) return { element: current, selector };
+    const parent: CheerioNode | null = current.parent;
+    current = parent && parent.type === "tag" ? parent : undefined;
+  }
+  const bodyNode = $("body").get(0);
+  const body = bodyNode?.type === "tag" ? bodyNode : undefined;
+  return body ? { element: body, selector: "body" } : { element: el, selector: stableSelfSelector($, el) };
+}
+
+function structuralPathFrom(
+  $: CheerioAPI,
+  anchor: CheerioElement,
+  target: CheerioElement,
+): string | undefined {
+  if (anchor === target) return "";
+  const parts: string[] = [];
+  let current: CheerioElement | undefined = target;
+  while (current && current !== anchor) {
+    const tag = current.tagName.toLowerCase();
+    const parent: CheerioNode | null = current.parent;
+    if (!parent || parent.type !== "tag") return undefined;
+    const sameTagSiblings = $(parent).children(tag).toArray();
+    const index = sameTagSiblings.indexOf(current);
+    parts.unshift(
+      sameTagSiblings.length > 1 ? `${tag}:nth-of-type(${index + 1})` : tag,
+    );
+    current = parent;
+  }
+  return current === anchor ? parts.join(" > ") : undefined;
+}
+
+function buildExactSelector($: CheerioAPI, el: CheerioElement): string {
+  const own = stableAnchorSelector($, el);
+  if (own) return own;
+  const anchor = nearestStableAnchor($, el);
+  const path = structuralPathFrom($, anchor.element, el);
+  return path ? `${anchor.selector} > ${path}` : stableSelfSelector($, el);
+}
+
 function buildItemSelector(
   $: CheerioAPI,
   container: CheerioElement,
@@ -503,19 +622,19 @@ function buildItemSelector(
 
   const sharedData = sharedDataAttribute(members);
   if (sharedData) {
-    candidates.push(`[${sharedData}]`);
+    candidates.push(`${buildExactSelector($, container)} > [${sharedData}]`);
   }
 
-  candidates.push(`${stableSelfSelector($, container)} > ${itemTag}`);
+  const anchor = nearestStableAnchor($, container);
+  const containerPath = structuralPathFrom($, anchor.element, container);
+  candidates.push(`${buildExactSelector($, container)} > ${itemTag}`);
+  candidates.push(`${anchor.selector} ${container.tagName.toLowerCase()} > ${itemTag}`);
+  if (containerPath) {
+    candidates.push(`${anchor.selector} > ${containerPath} > ${itemTag}`);
+  }
 
-  for (const candidate of candidates) {
-    let matchedCount: number;
-    try {
-      matchedCount = $(candidate).length;
-    } catch {
-      continue;
-    }
-    if (matchedCount === members.length) return candidate;
+  for (const candidate of [...new Set(candidates)]) {
+    if (selectorMatchesExactly($, candidate, members)) return candidate;
   }
   return undefined;
 }
@@ -527,20 +646,39 @@ interface FieldSpec {
   parts: string[];
   source: FieldSource;
   attribute?: string;
+  hints: string[];
 }
 
 const FIELD_SPECS: FieldSpec[] = [
-  { role: "title", parts: ["h1", "h2", "h3", "h4", "h5", "h6"], source: "text" },
-  { role: "description", parts: ["p"], source: "text" },
-  { role: "link", parts: ["a[href]"], source: "href" },
-  { role: "image", parts: ["img[src]"], source: "src" },
+  {
+    role: "title",
+    parts: ["h1", "h2", "h3", "h4", "h5", "h6"],
+    source: "text",
+    hints: ["heading", "primary text"],
+  },
+  { role: "description", parts: ["p"], source: "text", hints: ["prose"] },
+  { role: "link", parts: ["a[href]"], source: "href", hints: ["link"] },
+  { role: "image", parts: ["img[src]"], source: "src", hints: ["image"] },
   {
     role: "date",
     parts: ["time[datetime]"],
     source: "attr",
     attribute: "datetime",
+    hints: ["date", "machine-readable time"],
   },
-  { role: "tag", parts: [".tag", ".category"], source: "text" },
+  {
+    role: "dateText",
+    parts: ["time"],
+    source: "text",
+    hints: ["date", "visible time"],
+  },
+  { role: "tag", parts: [".tag", ".category"], source: "text", hints: ["tag"] },
+  {
+    role: "nestedList",
+    parts: ["ul", "ol"],
+    source: "text",
+    hints: ["nested list", "multiple values"],
+  },
 ];
 
 function detectFieldPart(
@@ -564,7 +702,18 @@ function readFieldValue(
   source: FieldSource,
   attribute?: string,
 ): string {
-  if (source === "text") return collapse(el.text());
+  if (source === "text") {
+    const tag = el.get(0)?.tagName?.toLowerCase();
+    if (tag === "ul" || tag === "ol") {
+      return el
+        .children()
+        .toArray()
+        .map((child) => collapse(el._make(child).text()))
+        .filter(Boolean)
+        .join(", ");
+    }
+    return collapse(el.text());
+  }
   if (source === "href") return el.attr("href") ?? "";
   if (source === "src") return el.attr("src") ?? "";
   if (source === "attr" && attribute) return el.attr(attribute) ?? "";
@@ -599,8 +748,33 @@ function buildField(
     attribute: spec.attribute,
     coverage,
     samples,
+    hints: spec.hints,
   };
 }
+
+const GENERIC_FIELD_SPECS: Array<Omit<FieldSpec, "role">> = [
+  { parts: ["h1"], source: "text", hints: ["heading", "level 1"] },
+  { parts: ["h2"], source: "text", hints: ["heading", "level 2"] },
+  { parts: ["h3"], source: "text", hints: ["heading", "level 3"] },
+  { parts: ["h4"], source: "text", hints: ["heading", "level 4"] },
+  { parts: ["p:nth-of-type(1)"], source: "text", hints: ["prose", "first paragraph"] },
+  { parts: ["p:nth-of-type(2)"], source: "text", hints: ["prose", "second paragraph"] },
+  { parts: ["p:nth-of-type(3)"], source: "text", hints: ["prose", "third paragraph"] },
+  { parts: ["span:nth-of-type(1)"], source: "text", hints: ["inline text", "first value"] },
+  { parts: ["span:nth-of-type(2)"], source: "text", hints: ["inline text", "second value"] },
+  { parts: ["span:nth-of-type(3)"], source: "text", hints: ["inline text", "third value"] },
+  { parts: ["time"], source: "text", hints: ["date", "visible time"] },
+  {
+    parts: ["time[datetime]"],
+    source: "attr",
+    attribute: "datetime",
+    hints: ["date", "machine-readable time"],
+  },
+  { parts: ["a[href]"], source: "href", hints: ["link"] },
+  { parts: ["img[src]"], source: "src", hints: ["image"] },
+  { parts: ["ul"], source: "text", hints: ["nested list", "multiple values"] },
+  { parts: ["ol"], source: "text", hints: ["nested list", "multiple values"] },
+];
 
 function extractFields(
   $: CheerioAPI,
@@ -611,6 +785,35 @@ function extractFields(
     const field = buildField($, members, spec);
     if (field) fields[spec.role] = field;
   }
+  let genericIndex = 1;
+  const seen = new Set(
+    Object.values(fields).map(
+      (field) => `${field.selector}|${field.source}|${field.attribute ?? ""}`,
+    ),
+  );
+  for (const spec of GENERIC_FIELD_SPECS) {
+    const field = buildField($, members, { ...spec, role: "candidate" });
+    if (!field) continue;
+    const signature = `${field.selector}|${field.source}|${field.attribute ?? ""}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    fields[`f${genericIndex++}`] = field;
+  }
+
+  if (Object.keys(fields).length === 0 && members.every((member) => $(member).children().length === 0)) {
+    const samples = members
+      .slice(0, 3)
+      .map((member) => truncate(collapse($(member).text()), MAX_FIELD_SAMPLE_LEN));
+    if (samples.some(Boolean)) {
+      fields.f1 = {
+        selector: "",
+        source: "text",
+        coverage: 1,
+        samples,
+        hints: ["item text", "leaf value"],
+      };
+    }
+  }
   return fields;
 }
 
@@ -618,6 +821,8 @@ function scoreGroup(
   memberCount: number,
   fields: Record<string, RepeatedField>,
   usedReadableClass: boolean,
+  hasStableSection: boolean,
+  itemTag: string,
 ): number {
   const countScore = Math.min(1, memberCount / 10);
   const coverages = Object.values(fields).map((f) => f.coverage);
@@ -627,11 +832,39 @@ function scoreGroup(
       : 0;
   const hasTitleAndLink = Boolean(fields.title) && Boolean(fields.link);
   const score =
-    countScore * 0.35 +
-    avgCoverage * 0.3 +
-    (hasTitleAndLink ? 0.25 : 0) +
-    (usedReadableClass ? 0.1 : 0);
+    countScore * 0.15 +
+    avgCoverage * 0.15 +
+    (fields.title ? 0.18 : 0) +
+    (fields.description ? 0.1 : 0) +
+    (fields.link ? 0.1 : 0) +
+    (fields.image ? 0.06 : 0) +
+    (fields.date ? 0.1 : 0) +
+    (fields.dateText ? 0.1 : 0) +
+    (fields.nestedList ? 0.12 : 0) +
+    (hasTitleAndLink ? 0.08 : 0) +
+    (hasStableSection ? 0.08 : 0) +
+    (itemTag === "li" || itemTag === "article" ? 0.05 : 0) +
+    (usedReadableClass ? 0.03 : 0);
   return Math.round(score * 1000) / 1000;
+}
+
+function groupContext($: CheerioAPI, container: CheerioElement) {
+  const sectionNode = $(container).closest("section, article, main, [role='region']").get(0);
+  if (!sectionNode || sectionNode.type !== "tag") return undefined;
+  const section = sectionNode;
+  const sectionSelector = buildExactSelector($, section);
+  const heading = collapse($(section).find("h1, h2, h3, h4").first().text()) || undefined;
+  const sectionId = $(section).attr("id") || undefined;
+  const ariaLabel = $(section).attr("aria-label")?.trim() || undefined;
+  const documentOrder = $.root().find("*").toArray().indexOf(sectionNode);
+  return {
+    sectionSelector,
+    ...(sectionId ? { sectionId } : {}),
+    ...(heading ? { heading: truncate(heading, HEADING_TEXT_MAX) } : {}),
+    ...(ariaLabel ? { ariaLabel: truncate(ariaLabel, HEADING_TEXT_MAX) } : {}),
+    landmark: section.tagName.toLowerCase(),
+    documentOrder,
+  };
 }
 
 function buildRepeatedGroup(
@@ -646,25 +879,36 @@ function buildRepeatedGroup(
   );
   if (!itemSelector) return undefined;
 
-  const containerSelector = stableSelfSelector($, candidate.container);
+  // A globally scoped structural item selector must be evaluated from the
+  // document root. Supplying its container as the query root would make a
+  // selector such as `#work > ol > li` match nothing in the browser. A
+  // container is useful only with a globally reusable simple item selector.
+  const containerSelector = /^[.[]/.test(itemSelector)
+    ? buildExactSelector($, candidate.container)
+    : undefined;
   const fields = extractFields($, candidate.members);
+  if (Object.keys(fields).length === 0) return undefined;
   const samples = candidate.members
     .slice(0, 3)
     .map((m) => truncate(collapse($(m).text()), MAX_GROUP_SAMPLE_LEN));
+  const context = groupContext($, candidate.container);
   const score = scoreGroup(
     candidate.members.length,
     fields,
     candidate.readableClassesShared.length > 0,
+    Boolean(context?.sectionId || context?.ariaLabel),
+    candidate.members[0].tagName.toLowerCase(),
   );
 
   return {
     id: "",
     itemSelector,
-    containerSelector,
+    ...(containerSelector ? { containerSelector } : {}),
     count: candidate.members.length,
     fields,
     samples,
     score,
+    ...(context ? { context } : {}),
   };
 }
 
@@ -720,6 +964,11 @@ export function extractPage(html: string, options: ExtractOptions): PageExtracti
   const sections = collectSections($);
   const contact = collectContact($, options);
   const repeatedGroups = detectRepeatedGroups($);
+  for (const section of sections) {
+    section.repeatedItemCount = repeatedGroups
+      .filter((group) => group.context?.sectionSelector === section.selector)
+      .reduce((total, group) => total + group.count, 0);
+  }
 
   const textLength = collapse($("body").text()).length;
   const lowInformation =

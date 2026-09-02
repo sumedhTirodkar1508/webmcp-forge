@@ -87,6 +87,12 @@ export function readField(
 
   switch (mapping.source) {
     case "text":
+      if (target.matches("ul, ol")) {
+        return Array.from(target.children)
+          .map((child) => cleanText(child.textContent))
+          .filter(Boolean)
+          .join(", ");
+      }
       return cleanText(target.textContent);
     case "href":
       return resolveUrl(target.getAttribute("href"), baseUrl);

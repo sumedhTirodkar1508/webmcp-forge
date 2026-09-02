@@ -34,6 +34,8 @@ export interface RunModelChainOptions<T> {
   /** Validates the raw response. Return {ok:true,value} or {ok:false,message}. */
   validate: (raw: unknown) => { ok: true; value: T } | { ok: false; message: string };
   timeoutMs: number;
+  /** Optional shorter request budget for backup models. */
+  fallbackTimeoutMs?: number;
   /** Transient retries allowed per model, from GEMINI_MAX_RETRIES_PER_MODEL. Default 1. */
   maxRetriesPerModel?: number;
   /** Called after every attempt so the caller can persist an ai_usage_event. */
@@ -111,7 +113,7 @@ export async function runModelChain<T>(
   const attempts: AiAttemptRecord[] = [];
   let lastFailure: AiFailure = { kind: "SCHEMA_INVALID", code: "schema_invalid" };
 
-  for (const model of o.models) {
+  for (const [modelIndex, model] of o.models.entries()) {
     let transientRetriesUsed = 0;
     let correctiveRetryUsed = 0;
     let attemptNumber = 0;
@@ -119,7 +121,9 @@ export async function runModelChain<T>(
     for (;;) {
       attemptNumber += 1;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), o.timeoutMs);
+      const requestTimeoutMs =
+        modelIndex === 0 ? o.timeoutMs : (o.fallbackTimeoutMs ?? o.timeoutMs);
+      const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
       const startedAt = now();
 
       let outcome:
@@ -199,6 +203,13 @@ export async function runModelChain<T>(
         break; // move to next model, no retry, no sleep
       }
 
+      // A request timeout has already consumed the full latency budget for
+      // this model. Retrying it immediately doubles the wait without evidence
+      // that the next attempt will finish; fall through to the faster model.
+      if (failure.kind === "TIMEOUT") {
+        break;
+      }
+
       if (failure.kind === "RATE_LIMITED") {
         if (transientRetriesUsed < maxRetriesPerModel) {
           transientRetriesUsed += 1;
@@ -212,7 +223,7 @@ export async function runModelChain<T>(
         break; // move to next model
       }
 
-      // TRANSIENT, TIMEOUT, UNKNOWN all behave like transient retries.
+      // TRANSIENT and UNKNOWN failures retain bounded same-model retries.
       if (transientRetriesUsed < maxRetriesPerModel) {
         transientRetriesUsed += 1;
         await sleep(backoffDelayMs(transientRetriesUsed, random));

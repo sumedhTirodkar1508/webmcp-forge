@@ -309,7 +309,17 @@ function buildHandler(id: CapabilityId, ctx: ToolContext): Handler {
           );
         }
 
-        window.location.assign(target);
+        if (isSameDocumentFragmentNavigation(ctx.currentUrl(), target)) {
+          const hash = new URL(target).hash;
+          if (window.location.hash !== hash) {
+            window.location.hash = hash;
+          } else {
+            const id = decodeURIComponent(hash.slice(1));
+            document.getElementById(id)?.scrollIntoView({ block: "start" });
+          }
+        } else {
+          window.location.assign(target);
+        }
         return textResult(`Navigating to ${target}.`, { navigated: true, url: target });
       };
 
@@ -424,4 +434,21 @@ export function collectLiveCounts(ctx: ToolContext): Record<string, number> {
   record("education", mapping.education);
 
   return counts;
+}
+export function isSameDocumentFragmentNavigation(
+  currentUrl: string,
+  targetUrl: string,
+): boolean {
+  try {
+    const current = new URL(currentUrl);
+    const target = new URL(targetUrl);
+    return (
+      Boolean(target.hash) &&
+      current.origin === target.origin &&
+      current.pathname === target.pathname &&
+      current.search === target.search
+    );
+  } catch {
+    return false;
+  }
 }

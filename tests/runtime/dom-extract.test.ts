@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { FieldMapping } from "@/lib/ai/mapping-schema";
+import { deriveHeuristicMapping } from "@/lib/ai/resolve-mapping";
+import { buildRepresentation, extractPage } from "@/lib/scanner/extract";
 import {
   MAX_ITEMS,
   cleanText,
@@ -53,6 +57,46 @@ describe("cleanText", () => {
   });
 });
 
+describe("modern component mapping in the live DOM", () => {
+  const html = readFileSync(
+    join(process.cwd(), "tests/fixtures/modern-component-portfolio.html"),
+    "utf8",
+  );
+  const page = extractPage(html, {
+    url: "https://components.example/",
+    origin: "https://components.example",
+    httpStatus: 200,
+    contentType: "text/html",
+    byteSize: Buffer.byteLength(html),
+  });
+  const mapping = deriveHeuristicMapping(
+    buildRepresentation([page], {
+      origin: "https://components.example",
+      entryUrl: "https://components.example/",
+      failures: [],
+    }),
+  ).mapping;
+  const doc = createDocument(html);
+
+  it("executes all scoped collection selectors with their expected counts", () => {
+    for (const [key, expected] of [
+      ["projects", 3],
+      ["skills", 3],
+      ["experience", 2],
+      ["education", 2],
+    ] as const) {
+      const list = mapping[key];
+      expect(list).toBeDefined();
+      expect(extractList(doc, list!, "https://components.example/").matchCount).toBe(expected);
+    }
+  });
+
+  it("returns skill category values as a readable delimited list", () => {
+    const result = extractList(doc, mapping.skills!, "https://components.example/");
+    expect(result.items[0]?.fields.items).toBe("TypeScript, Python");
+  });
+});
+
 describe("safeQueryAll / safeQuery", () => {
   const doc = createDocument(portfolioHtml({ projectCount: 2 }));
 
@@ -87,6 +131,14 @@ describe("readField", () => {
   it("reads text, collapsed and trimmed", () => {
     const mapping: FieldMapping = { selector: ".project-title", source: "text" };
     expect(readField(item, mapping, BASE_URL)).toBe("Project 1");
+  });
+
+  it("keeps nested-list values distinct", () => {
+    const wrapper = doc.createElement("div");
+    wrapper.innerHTML = "<ul><li>TypeScript</li><li>Postgres</li><li>Redis</li></ul>";
+    expect(readField(wrapper, { selector: "ul", source: "text" }, BASE_URL)).toBe(
+      "TypeScript, Postgres, Redis",
+    );
   });
 
   it("resolves an href against the base URL", () => {

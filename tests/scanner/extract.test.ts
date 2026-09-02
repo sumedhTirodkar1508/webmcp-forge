@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { load } from "cheerio";
 
 import { buildRepresentation, extractPage } from "@/lib/scanner/extract";
 import type { ExtractOptions } from "@/lib/scanner/extract";
@@ -181,6 +182,72 @@ describe("extractPage — client-rendered.html (empty shell)", () => {
 
   it("finds no repeated groups in an empty shell", () => {
     expect(page.repeatedGroups).toHaveLength(0);
+  });
+});
+
+describe("extractPage — modern component portfolio regression", () => {
+  const page = extractFixture(
+    "modern-component-portfolio.html",
+    "https://components.example/",
+  );
+
+  it("preserves same-page fragments for navigation but strips them from crawl identity", () => {
+    const work = page.nav.find((entry) => entry.label === "Work");
+    expect(work).toMatchObject({
+      href: "https://components.example/#work",
+      path: "/#work",
+      pathname: "/",
+    });
+    expect(page.links.filter((entry) => entry.pathname === "/")).toHaveLength(1);
+  });
+
+  it("scopes adjacent generated-class lists to the intended section", () => {
+    const work = page.repeatedGroups.find((group) => group.context?.sectionId === "work");
+    const experience = page.repeatedGroups.find(
+      (group) => group.context?.sectionId === "experience" && group.count === 2,
+    );
+    const education = page.repeatedGroups.find(
+      (group) => group.context?.sectionId === "education" && group.count === 2,
+    );
+
+    expect(work?.count).toBe(3);
+    expect(work?.itemSelector).toContain("#work");
+    expect(work?.containerSelector).toBeUndefined();
+    expect(experience?.itemSelector).toContain("#experience");
+    expect(education?.itemSelector).toContain("#education");
+    expect(new Set([work?.itemSelector, experience?.itemSelector, education?.itemSelector]).size).toBe(3);
+
+    const $ = load(readFixture("modern-component-portfolio.html"));
+    for (const [group, sectionId, count] of [
+      [work, "work", 3],
+      [experience, "experience", 2],
+      [education, "education", 2],
+    ] as const) {
+      expect(group).toBeDefined();
+      const matches = $(group!.itemSelector);
+      expect(matches).toHaveLength(count);
+      expect(matches.toArray().every((node) => $(node).closest("section").attr("id") === sectionId)).toBe(true);
+    }
+  });
+
+  it("discovers nested skill categories and generic semantic field hints", () => {
+    const skills = page.repeatedGroups.find(
+      (group) => group.context?.sectionId === "skills" && group.count === 3,
+    );
+    expect(skills).toBeDefined();
+    expect(skills?.fields.title?.samples).toContain("Languages");
+    expect(skills?.fields.nestedList?.samples[0]).toContain("TypeScript");
+    expect(Object.values(skills?.fields ?? {}).some((field) => field.hints?.includes("nested list"))).toBe(true);
+  });
+
+  it("keeps sections in document order with repeated-content context", () => {
+    const ids = page.sections.map((section) => section.id).filter(Boolean);
+    expect(ids.indexOf("work")).toBeLessThan(ids.indexOf("experience"));
+    expect(ids.indexOf("experience")).toBeLessThan(ids.indexOf("skills"));
+    expect(page.sections.find((section) => section.id === "work")?.repeatedItemCount).toBe(3);
+    const intro = page.sections.find((section) => section.id === "top");
+    const $ = load(readFixture("modern-component-portfolio.html"));
+    expect($(intro!.selector)).toHaveLength(1);
   });
 });
 

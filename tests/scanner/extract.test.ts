@@ -251,6 +251,33 @@ describe("extractPage — modern component portfolio regression", () => {
   });
 });
 
+describe("extractPage — separately deployable demo portfolio", () => {
+  const page = extractFixture("demo-portfolio.html", "https://forge-demo.example/");
+
+  it("detects the complete contest demo structure without Forge-specific markup", () => {
+    const groupFor = (sectionId: string, count: number) =>
+      page.repeatedGroups.find(
+        (group) => group.context?.sectionId === sectionId && group.count === count,
+      );
+
+    expect(page.headings[0]).toMatchObject({ level: 1, text: "Alex Morgan" });
+    expect(groupFor("work", 4)?.fields.title?.samples).toContain("Fieldnote");
+    expect(groupFor("experience", 3)?.fields.dateText?.samples).toContain("2024 — Present");
+    expect(groupFor("skills", 6)?.fields.nestedList?.samples[0]).toContain("TypeScript");
+    expect(groupFor("education", 2)?.fields.title?.samples).toContain(
+      "Master of Human-Centred Computing",
+    );
+    expect(page.contact.emails).toContain("alex@example.test");
+    expect(page.nav.map((item) => item.path)).toEqual([
+      "/#work",
+      "/#experience",
+      "/#skills",
+      "/#education",
+      "/#contact",
+    ]);
+  });
+});
+
 describe("buildRepresentation", () => {
   const home = extractFixture("portfolio-home.html", "https://jordanrivera.dev/");
   const work = extractFixture("portfolio-work.html", "https://jordanrivera.dev/work");

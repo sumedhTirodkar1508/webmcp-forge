@@ -43,8 +43,14 @@ interface RuntimeState {
   status: "loading" | "ready" | "error" | "idle";
   error?: string;
   webmcp: ReturnType<typeof checkWebMcpAvailability>;
-  registeredTools: string[];
-  failedTools: Array<{ name: string; message: string }>;
+  /** Native and other tools visible before Forge attempted registration. */
+  existingTools: string[];
+  /** Forge tool names left untouched because the host already owns them. */
+  conflictingTools: string[];
+  /** Tools registered by this Forge runtime instance. */
+  forgeRegisteredTools: string[];
+  /** Non-collision registration failures from the browser API. */
+  forgeRegistrationFailures: Array<{ name: string; message: string }>;
 }
 
 declare global {
@@ -127,8 +133,10 @@ function start(): void {
     configVersion: null,
     status: "loading",
     webmcp: checkWebMcpAvailability(),
-    registeredTools: [],
-    failedTools: [],
+    existingTools: [],
+    conflictingTools: [],
+    forgeRegisteredTools: [],
+    forgeRegistrationFailures: [],
   };
 
   let config: RuntimeConfig | null = null;
@@ -187,8 +195,15 @@ function start(): void {
       return;
     }
     dispose = result.dispose;
-    state.registeredTools = result.registered;
-    state.failedTools = result.failed;
+    state.existingTools = result.existingTools;
+    state.conflictingTools = result.conflictingTools;
+    state.forgeRegisteredTools = result.registered;
+    state.forgeRegistrationFailures = result.failed;
+    if (result.conflictingTools.length > 0) {
+      log("left existing WebMCP tools untouched due to name conflicts", {
+        count: result.conflictingTools.length,
+      });
+    }
   };
 
   void (async () => {
@@ -313,10 +328,12 @@ async function maybeVerify(
     path: window.location.pathname,
     webmcpAvailable: state.webmcp.available,
     webmcpReason: state.webmcp.reason ?? null,
-    toolsRegistered: state.registeredTools.length,
-    toolNames: state.registeredTools,
+    toolsRegistered: state.forgeRegisteredTools.length,
+    toolNames: state.forgeRegisteredTools,
     toolsVisibleToBrowser: registered.map((tool) => tool.name),
-    toolRegistrationFailures: state.failedTools,
+    toolRegistrationFailures: state.forgeRegistrationFailures,
+    existingTools: state.existingTools,
+    conflictingTools: state.conflictingTools,
     liveCounts: collectLiveCounts(context),
     mappingHealth: Object.fromEntries(
       config.enabledCapabilities.map((id) => [

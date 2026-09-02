@@ -86,6 +86,8 @@ describeDb("verification and the public boundary", () => {
     toolNames: ["get_profile", "list_projects", "get_contact_info"],
     toolsVisibleToBrowser: ["get_profile", "list_projects", "get_contact_info"],
     toolRegistrationFailures: [],
+    existingTools: [],
+    conflictingTools: [],
     liveCounts: { projects: 8 },
     mappingHealth: { list_projects: true },
   });

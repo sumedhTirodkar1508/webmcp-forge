@@ -81,6 +81,8 @@ export interface VerificationReport {
   toolNames: string[];
   toolsVisibleToBrowser: string[];
   toolRegistrationFailures: Array<{ name: string; message: string }>;
+  existingTools: string[];
+  conflictingTools: string[];
   liveCounts: Record<string, number>;
   mappingHealth: Record<string, boolean>;
 }
@@ -140,7 +142,7 @@ export async function recordVerification(
       })
     : null;
 
-  const diagnostics = buildDiagnostics(report, publishedVersion?.version ?? null);
+  const diagnostics = buildVerificationDiagnostics(report, publishedVersion?.version ?? null);
   const outcome = diagnostics.some((d) => d.status === "fail")
     ? "FAILED"
     : diagnostics.some((d) => d.status === "warn")
@@ -164,7 +166,7 @@ export async function recordVerification(
   });
 }
 
-function buildDiagnostics(
+export function buildVerificationDiagnostics(
   report: VerificationReport,
   expectedConfigVersion: number | null,
 ): VerificationDiagnostic[] {
@@ -192,6 +194,15 @@ function buildDiagnostics(
           detail: `the page is using version ${report.configVersion}; the current version is ${expectedConfigVersion}. It may still be cached.`,
         },
   );
+
+  if (report.conflictingTools.length > 0) {
+    diagnostics.push({
+      id: "tool_collisions",
+      label: `${report.conflictingTools.length} generated tool name${report.conflictingTools.length === 1 ? " conflicts" : "s conflict"} with tools already provided by this site`,
+      status: "warn",
+      detail: `left untouched: ${report.conflictingTools.join(", ")}`,
+    });
+  }
 
   const mappingEntries = Object.entries(report.mappingHealth);
   const brokenMappings = mappingEntries.filter(([, healthy]) => !healthy).map(([id]) => id);

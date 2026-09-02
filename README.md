@@ -12,6 +12,24 @@ MIT licensed. Built with Next.js 16, TypeScript, Prisma 7, Postgres and the Goog
 
 ---
 
+## 30-second version
+
+- Scan a public portfolio URL with a bounded, SSRF-hardened server-side scanner.
+- Review the structural mapping and allowed capabilities, then install one
+  generated script tag.
+- The tiny framework-free runtime reads the portfolio's **live DOM** and
+  registers real browser WebMCP tools. It never calls Gemini or Forge during a
+  tool invocation.
+- Native site tools always win: if a capability name already exists, Forge
+  leaves it untouched and reports the collision during verification.
+
+For a reproducible demonstration, see the [contest runbook](docs/CONTEST_DEMO.md),
+the [temporary DevTools runtime test](docs/DEVTOOLS_RUNTIME_TEST.md), and the
+[deployment guide](docs/DEPLOYMENT.md). A clean static portfolio used by the
+demo lives in [`examples/demo-portfolio`](examples/demo-portfolio/).
+
+---
+
 ## The problem
 
 An AI agent visiting a portfolio site today has to do what a screen-scraper does: guess at the DOM, hope the class names mean something, and re-guess after every redesign. It works badly and breaks constantly.
@@ -105,7 +123,7 @@ Configurations are **immutable and versioned**. Publishing points the site at on
 
 Installed once. Changing capabilities later never requires touching the website again — everything variable lives behind the configuration endpoint the runtime fetches.
 
-The runtime is framework-free browser JavaScript, ~21 kB minified. No React, no injected UI, no dependencies. Authored in TypeScript so it can share types and be unit-tested, bundled with esbuild.
+The runtime is framework-free browser JavaScript, ~23 kB minified. No React, no injected UI, no dependencies. Authored in TypeScript so it can share types and be unit-tested, bundled with esbuild.
 
 ### 5. Execute — live DOM, zero AI
 
@@ -372,6 +390,16 @@ Unit suites run anywhere. The integration suites — anonymous ownership, verifi
 
 They use a real database on purpose: the thing under test is that a query scoped to one session cannot reach another session's row, and a stubbed Prisma would only prove the stub agrees with itself.
 
+Runtime coverage uses a controlled `document.modelContext` shim at the adapter
+boundary plus DOM tests against scanner fixtures. It verifies that a native
+tool name is never overwritten, a rejected tool does not prevent independent
+registrations, and a portfolio's live DOM changes are reflected in results.
+Because WebMCP is browser-experimental, the final browser API check remains a
+manual DevTools test on the installed portfolio; use the
+[DevTools guide](docs/DEVTOOLS_RUNTIME_TEST.md) for the exact commands. We do
+not run a production headless browser as part of scanning or claim a simulated
+tool call is a real agent-path test.
+
 ---
 
 ## Deploying
@@ -399,6 +427,11 @@ DIRECT_URL="postgresql://…" pnpm db:migrate:deploy
 ```
 
 `pnpm build` bundles the runtime and generates the Prisma client, so no extra build step is needed.
+
+The full production and separate-demo setup is in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). CI runs dependency installation,
+Prisma validation/generation, type-checking, linting, tests, and the production
+build on every push and pull request.
 
 ---
 

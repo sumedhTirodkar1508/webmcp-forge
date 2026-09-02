@@ -93,6 +93,10 @@ export function canExecuteTools(): boolean {
  * must not take the rest down with it.
  */
 export interface RegisterToolsResult {
+  /** Tool names present before Forge attempted registration, when enumerable. */
+  existingTools: string[];
+  /** Forge names already owned by the host page and intentionally skipped. */
+  conflictingTools: string[];
   registered: string[];
   failed: Array<{ name: string; message: string }>;
   /** Unregisters everything registered by this call. */
@@ -105,7 +109,13 @@ export async function registerTools(
 ): Promise<RegisterToolsResult> {
   const context = getModelContext();
   if (!context) {
-    return { registered: [], failed: [], dispose: () => {} };
+    return {
+      existingTools: [],
+      conflictingTools: [],
+      registered: [],
+      failed: [],
+      dispose: () => {},
+    };
   }
 
   const controller = new AbortController();
@@ -116,8 +126,17 @@ export async function registerTools(
 
   const registered: string[] = [];
   const failed: Array<{ name: string; message: string }> = [];
+  // getTools is optional in practice while the WebMCP draft evolves. When it
+  // works, reserve native names before we call registerTool; when it does not,
+  // registration remains best-effort and duplicate-name rejection is reported.
+  const existingTools = await listRegisteredTools();
+  const existingNames = new Set(existingTools.map((tool) => tool.name));
+  const conflictingTools = tools
+    .filter((tool) => existingNames.has(tool.name))
+    .map((tool) => tool.name);
 
   for (const tool of tools) {
+    if (existingNames.has(tool.name)) continue;
     try {
       await context.registerTool(tool, {
         ...(options.exposedTo ? { exposedTo: options.exposedTo } : {}),
@@ -133,6 +152,8 @@ export async function registerTools(
   }
 
   return {
+    existingTools: [...existingNames].slice(0, 50),
+    conflictingTools: conflictingTools.slice(0, 50),
     registered,
     failed,
     dispose: () => controller.abort(),

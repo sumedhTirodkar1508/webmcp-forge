@@ -39,6 +39,8 @@ const reportSchema = z.object({
     .array(z.object({ name: z.string().max(64), message: z.string().max(300) }))
     .max(50)
     .default([]),
+  existingTools: z.array(z.string().max(64)).max(50).default([]),
+  conflictingTools: z.array(z.string().max(64)).max(50).default([]),
   liveCounts: z.record(z.string().max(40), z.number().int().min(0).max(100_000)).default({}),
   mappingHealth: z.record(z.string().max(40), z.boolean()).default({}),
 });

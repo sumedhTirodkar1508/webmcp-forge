@@ -205,20 +205,43 @@ export type WebMcpInputMode = "unknown" | "object" | "serialized";
 const inputModes = new WeakMap<ModelContext, Exclude<WebMcpInputMode, "unknown">>();
 
 /**
- * Tools that may be used to LEARN the mode.
+ * Tools that may NEVER take part in mode negotiation.
  *
- * Read-only tools qualify by definition. `prepare_contact_message` also
- * qualifies, and deliberately so: it validates input and stages a draft in page
- * memory, submitting nothing and contacting no server, so running it twice is
- * indistinguishable from running it once.
- *
- * `send_contact_message` is absent on purpose and must never be added. It is
- * the one tool where a retry could mean a second real form submission.
+ * `send_contact_message` submits a real message through someone's form. Even
+ * though the parse failure below is provably pre-dispatch, this list is an
+ * absolute stop: nothing about a browser-compatibility workaround should be
+ * able to reach a submitting tool twice. Checked before anything else, so an
+ * annotation claiming otherwise cannot override it.
  */
-const PROBE_SAFE_TOOLS = new Set(["prepare_contact_message"]);
+const NEVER_NEGOTIATE = new Set(["send_contact_message", "submit_contact_message"]);
 
-function isProbeSafe(tool: WebMcpRegisteredTool): boolean {
-  return tool.annotations?.readOnlyHint === true || PROBE_SAFE_TOOLS.has(tool.name);
+/**
+ * Tools whose effects are safely repeatable, and may therefore be retried once
+ * in the other argument shape.
+ *
+ * Read-only tools qualify by definition. The three named here qualify because
+ * running them twice is indistinguishable from running them once:
+ *
+ *   `navigate_site`            asks the browser to go to a URL
+ *   `focus_project`            scrolls an element into view
+ *   `prepare_contact_message`  stages a draft in page memory, sends nothing
+ *
+ * These were previously excluded because they change the viewport, which meant
+ * a fresh browser context could not learn its input mode from an action tool:
+ * the first `navigate_site` failed, the next `focus_project` failed, and the
+ * mode was only discovered once some harmless read tool happened to run. The
+ * failing attempt never dispatched anything, so nothing was gained by that.
+ */
+const REPEATABLE_TOOLS = new Set([
+  "navigate_site",
+  "focus_project",
+  "prepare_contact_message",
+]);
+
+/** Whether this tool may be retried in the other argument shape. */
+function canNegotiateWith(tool: WebMcpRegisteredTool): boolean {
+  if (NEVER_NEGOTIATE.has(tool.name)) return false;
+  return tool.annotations?.readOnlyHint === true || REPEATABLE_TOOLS.has(tool.name);
 }
 
 /** The mode currently known for the live ModelContext. */
@@ -300,7 +323,7 @@ async function executeWithNegotiation(
     inputModes.set(context, "object");
     return result;
   } catch (error) {
-    if (!isInputParseFailure(error) || !isProbeSafe(tool)) throw error;
+    if (!isInputParseFailure(error) || !canNegotiateWith(tool)) throw error;
 
     const result = await callExecuteTool(context, tool, input, options, "serialized");
     inputModes.set(context, "serialized");

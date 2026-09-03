@@ -3,10 +3,14 @@ import type { PlatformId } from "@/lib/scanner/types";
 /**
  * The installation snippet and the platform-specific instructions around it.
  *
- * The snippet is generated once and never changes: it carries the site's public
- * id and nothing else, so turning a capability on or re-scanning the site does
- * not require the owner to touch their website again. Everything variable lives
- * behind the configuration endpoint the runtime fetches.
+ * The snippet carries two attributes: a permanent `data-wmf-site` identifying
+ * the website, and a `data-wmf-config` pinning the exact configuration version
+ * to run. The runtime is installed once, but the pin is a deliberate
+ * deployment decision — generating a new configuration in Forge changes
+ * nothing on the live site until someone updates that number and redeploys.
+ *
+ * Instructions must therefore never imply that settings changes are picked up
+ * automatically.
  */
 
 export const RUNTIME_PATH = "/runtime/v1.js";
@@ -17,7 +21,8 @@ export const RUNTIME_PATH = "/runtime/v1.js";
  * Two attributes, with different jobs:
  *
  *   `data-wmf-site`   identifies the website — permanent, never changes.
- *   `data-wmf-config` pins the EXACT configuration version to run.
+ *   `data-wmf-config` pins the EXACT configuration version to run, and DOES
+ *                     change every time a new configuration is deployed.
  *
  * The pin is what makes this MVP safe without accounts. Anyone can generate a
  * configuration in Forge, but nothing they generate executes here until
@@ -61,7 +66,7 @@ const CUSTOM: Omit<InstallInstructions, "platform"> = {
   ],
   notes: [
     "If your site is built from separate HTML files, add the snippet to each one — or to the shared layout/partial if you have one.",
-    "The snippet is safe to leave in place permanently. Changing your settings here never requires editing it again.",
+    "The script tag itself stays in place, but the version it pins does not: when you generate a new configuration, update data-wmf-config to the new version and redeploy your site.",
   ],
 };
 

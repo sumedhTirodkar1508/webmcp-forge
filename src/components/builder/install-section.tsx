@@ -34,7 +34,7 @@ const CUSTOM_INSTRUCTIONS: InstallInstructions = {
   ],
   notes: [
     "If your site is built from separate HTML files, add the snippet to each one — or to the shared layout/partial if you have one.",
-    "The snippet is safe to leave in place permanently. Changing your settings here never requires editing it again.",
+    "The script tag itself stays in place, but the version it pins does not: when you generate a new configuration, update data-wmf-config to the new version and redeploy your site.",
   ],
 };
 
@@ -173,7 +173,9 @@ export function InstallSection() {
       </p>
       <div className="flex flex-col gap-4">
         <p className="text-sm text-muted-foreground">
-          Install this once. Changing your settings here never requires editing your site again.
+          Install the runtime once. When you generate a new configuration, update{" "}
+          <code className="font-mono">data-wmf-config</code> to the new version and redeploy
+          your site.
         </p>
 
         {!installation && (

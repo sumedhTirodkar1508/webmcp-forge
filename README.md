@@ -42,7 +42,7 @@ WebMCP Forge closes that gap. The person using it never sees `document.modelCont
 
 ## Who it's for
 
-Designers and other non-technical portfolio owners on **Framer**, **Wix**, **Webflow**, **Squarespace**, or a custom-built site.
+Designers and other non-technical portfolio owners on **Framer**, **Wix**, **Webflow**, or a custom-built site.
 
 ## The workflow
 
@@ -81,6 +81,7 @@ Five steps. No account, no signup.
                      │              .registerTool(...)          │
                      └──────────────────────────────────────────┘
                                      ▲
+                                     │  during tool invocation:
                                      │  no Gemini. no callback. no network.
                               a WebMCP agent
 ```
@@ -203,6 +204,17 @@ An agent can hold this conversation:
 …and the interface visibly updates as it goes.
 
 The architectural rule that makes this real: **there is no separate implementation for agents.** A tool handler calls the same action a button calls, which hits the same API route, which calls the same service. The UI updates because it is the same state — not because anything is animated to look busy.
+
+---
+
+### Try it
+
+- **Live app:** https://webmcp-forge.vercel.app
+- **Demo video (2:57):** https://youtu.be/qLR0GThly8w
+- **Source code:** https://github.com/sumedhTirodkar1508/webmcp-forge
+- **Contest demo runbook:** [docs/CONTEST_DEMO.md](docs/CONTEST_DEMO.md)
+
+> For the best experience, open the live app in ChatGPT's WebMCP-capable browser or Google Chrome with WebMCP enabled.
 
 ---
 

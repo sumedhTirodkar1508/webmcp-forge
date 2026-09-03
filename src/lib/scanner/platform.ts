@@ -162,7 +162,21 @@ function hasRealContent($: CheerioAPI): boolean {
   return text.length >= 100 || $("h1,h2,h3").length > 0;
 }
 
-/** Hostname suffixes builders serve on before a custom domain is attached. */
+/**
+ * Hostname suffixes builders serve on before a custom domain is attached.
+ *
+ * These are all domains owned by the site BUILDER, so serving from one really
+ * is evidence of how the site was made: a page on `framer.app` was built in
+ * Framer.
+ *
+ * Generic hosting domains do not belong here. `vercel.app` was listed as
+ * evidence of Next.js, but Vercel hosts anything — our own demo portfolio is
+ * plain static HTML on `*.vercel.app` and was being reported as Next.js, which
+ * then produced Next.js installation instructions for a site with no Next.js
+ * in it. Next.js is now recognised only from real markup evidence
+ * (`__NEXT_DATA__`, `/_next/static/`), which appears on a Vercel-hosted Next
+ * site anyway.
+ */
 const HOSTNAME_SIGNALS: Array<
   [Exclude<PlatformId, "CUSTOM" | "UNKNOWN">, string[]]
 > = [
@@ -170,7 +184,6 @@ const HOSTNAME_SIGNALS: Array<
   ["WEBFLOW", ["webflow.io"]],
   ["WIX", ["wixsite.com", "editorx.io"]],
   ["SQUARESPACE", ["squarespace.com"]],
-  ["NEXTJS", ["vercel.app"]],
 ];
 
 function hostnameSignal(

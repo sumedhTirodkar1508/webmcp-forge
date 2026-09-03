@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,7 +53,26 @@ if (watch) {
 } else {
   const result = await esbuild.build({ ...options, metafile: true });
   const [, meta] = Object.entries(result.metafile.outputs)[0];
+
+  /*
+   * Verify the artifact actually landed on disk.
+   *
+   * `/runtime/v1.js` is a public contract: every installed portfolio loads it
+   * by that exact URL. A build that "succeeds" without writing it produces a
+   * deployment that 404s for every site that has already been installed, and
+   * nothing else in the pipeline would notice — `public/runtime` is
+   * gitignored, so there is no committed copy to fall back on.
+   */
+  const written = await stat(outfile).catch(() => null);
+  if (!written || written.size === 0) {
+    throw new Error(
+      `runtime bundle was not written to ${path.relative(root, outfile)}. ` +
+        "Installed sites load this by URL, so the build must not continue without it.",
+    );
+  }
+
   console.log(
-    `built ${path.relative(root, outfile)} (${(meta.bytes / 1024).toFixed(1)} kB minified)`,
+    `built ${path.relative(root, outfile)} ` +
+      `(${(meta.bytes / 1024).toFixed(1)} kB minified, ${written.size} bytes on disk)`,
   );
 }

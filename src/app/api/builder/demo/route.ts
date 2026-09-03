@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { assertSameOrigin, jsonError, jsonOk, readJson } from "@/lib/http/respond";
-import { routeDemoQuestion } from "@/lib/services/demo-service";
+import { askAgent } from "@/lib/services/agent-chat-service";
 import { requireBuilderSession } from "@/lib/session";
 
 const bodySchema = z.object({
@@ -10,11 +10,12 @@ const bodySchema = z.object({
 });
 
 /**
- * POST /api/builder/demo — ask the natural-language demo a question.
+ * POST /api/builder/demo — ask the readiness assistant a question.
  *
- * Returns which tool an agent would call. The per-site question limit is
- * enforced inside the service, against the AI usage ledger, before any request
- * to Gemini is made.
+ * Answers operational questions from the readiness snapshot, and content
+ * questions by executing a real read-only WebMCP tool through the live test
+ * relay when one is connected. The per-site lifetime limit is enforced inside
+ * the service, against the AI usage ledger, before anything reaches Gemini.
  */
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -22,7 +23,7 @@ export async function POST(request: Request): Promise<Response> {
     const body = await readJson(request, bodySchema);
     const session = await requireBuilderSession();
 
-    return jsonOk(await routeDemoQuestion(session, body.siteId, body.question));
+    return jsonOk(await askAgent(session, body.siteId, body.question));
   } catch (error) {
     return jsonError(error);
   }

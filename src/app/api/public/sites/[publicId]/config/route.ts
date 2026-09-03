@@ -1,30 +1,48 @@
 import { corsFor } from "@/lib/http/cors";
 import { isValidPublicSiteId } from "@/lib/ids";
-import { getPublishedConfig } from "@/lib/services/config-service";
+import { getConfigVersion } from "@/lib/services/config-service";
+import { findSiteByPublicId } from "@/lib/services/site-service";
 
 /**
  * The public runtime configuration endpoint.
  *
- * GET /api/public/sites/{publicId}/config
+ * GET /api/public/sites/{publicId}/config?version=N
  *
- * This is the only route by which configuration reaches the open internet, and
- * it serves exactly one thing: the site's currently published version. Drafts
- * are unreachable by construction — `getPublishedConfig` reads through
- * `Site.publishedConfigVersionId`, which only publishing ever sets — and the
- * payload was built field by field by `serializeRuntimeConfig`, so no database
- * row is ever spread into it.
+ * `version` is REQUIRED and served exactly. There is deliberately no "latest"
+ * behaviour: a website pins the version it runs in `data-wmf-config`, and
+ * quietly serving a different one would mean a configuration nobody deployed
+ * started executing on a live site. Since anyone can generate a configuration
+ * in this MVP, that pin is the actual security boundary — so a missing version
+ * is an error the runtime reports, never something to substitute around.
+ *
+ * The payload was built field by field by `serializeRuntimeConfig`, so no
+ * database row is ever spread into it.
  */
 
 const METHODS = "GET, OPTIONS";
 
-/** Short enough that publishing feels immediate; long enough to be cacheable. */
+/** Short enough that redeploying feels immediate; long enough to be cacheable. */
 const CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=60";
 
-function notFound(headers: Record<string, string>): Response {
+function errorResponse(
+  status: number,
+  code: string,
+  message: string,
+  headers: Record<string, string>,
+): Response {
   return Response.json(
-    { error: { code: "NOT_FOUND", message: "No published configuration for that site." } },
-    { status: 404, headers: { ...headers, "cache-control": "no-store" } },
+    { error: { code, message } },
+    { status, headers: { ...headers, "cache-control": "no-store" } },
   );
+}
+
+/** Parses `?version=` strictly: a bad value must not become "latest". */
+function parseVersion(url: string): number | null {
+  const raw = new URL(url).searchParams.get("version");
+  if (raw === null) return null;
+  if (!/^\d{1,7}$/.test(raw)) return null;
+  const version = Number(raw);
+  return version >= 1 ? version : null;
 }
 
 export async function OPTIONS(
@@ -32,16 +50,12 @@ export async function OPTIONS(
   ctx: RouteContext<"/api/public/sites/[publicId]/config">,
 ): Promise<Response> {
   const { publicId } = await ctx.params;
-  const requestOrigin = request.headers.get("origin");
+  if (!isValidPublicSiteId(publicId)) return new Response(null, { status: 404 });
 
-  if (!isValidPublicSiteId(publicId)) {
-    return new Response(null, { status: 404 });
-  }
+  const site = await findSiteByPublicId(publicId);
+  if (!site) return new Response(null, { status: 404 });
 
-  const published = await getPublishedConfig(publicId);
-  if (!published) return new Response(null, { status: 404 });
-
-  const cors = corsFor(requestOrigin, published.origin, METHODS);
+  const cors = corsFor(request.headers.get("origin"), site.origin, METHODS);
   return new Response(null, {
     status: cors.allowed ? 204 : 403,
     headers: cors.headers,
@@ -54,29 +68,48 @@ export async function GET(
 ): Promise<Response> {
   const { publicId } = await ctx.params;
   const requestOrigin = request.headers.get("origin");
+  const baseHeaders = { vary: "Origin" };
 
-  // Validate the shape before touching the database.
   if (!isValidPublicSiteId(publicId)) {
-    return notFound({ vary: "Origin" });
+    return errorResponse(404, "NOT_FOUND", "Unknown site.", baseHeaders);
   }
 
-  const published = await getPublishedConfig(publicId);
-  if (!published) return notFound({ vary: "Origin" });
+  const site = await findSiteByPublicId(publicId);
+  if (!site) {
+    return errorResponse(404, "NOT_FOUND", "Unknown site.", baseHeaders);
+  }
 
-  const cors = corsFor(requestOrigin, published.origin, METHODS);
+  const cors = corsFor(requestOrigin, site.origin, METHODS);
   if (!cors.allowed) {
-    return Response.json(
-      {
-        error: {
-          code: "FORBIDDEN",
-          message: "This configuration is only served to the site it was published for.",
-        },
-      },
-      { status: 403, headers: cors.headers },
+    return errorResponse(
+      403,
+      "FORBIDDEN",
+      "This configuration is only served to the site it was generated for.",
+      cors.headers,
     );
   }
 
-  return Response.json(published.config, {
+  const version = parseVersion(request.url);
+  if (version === null) {
+    return errorResponse(
+      400,
+      "VALIDATION_FAILED",
+      "This installation snippet is missing a valid data-wmf-config version.",
+      cors.headers,
+    );
+  }
+
+  const found = await getConfigVersion(publicId, version);
+  if (!found) {
+    return errorResponse(
+      404,
+      "NOT_FOUND",
+      `Configuration version ${version} does not exist for this site.`,
+      cors.headers,
+    );
+  }
+
+  return Response.json(found.config, {
     headers: { ...cors.headers, "cache-control": CACHE_CONTROL },
   });
 }

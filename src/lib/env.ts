@@ -19,6 +19,10 @@ const ALIASES: Record<string, string> = {
   GEMINI_SEMANTIC_FALLBACK_1_MODEL: "GEMINI_FALLBACK_MODEL_1",
   GEMINI_SEMANTIC_FALLBACK_2_MODEL: "GEMINI_FALLBACK_MODEL_2",
   GEMINI_NL_DEMO_MODEL: "GEMINI_PREVIEW_MODEL",
+  // The natural-language chain is deliberately separate from the scan chain:
+  // it is interactive, so it uses two cheap models with a shorter budget.
+  GEMINI_NL_DEMO_PRIMARY_MODEL: "GEMINI_NL_DEMO_MODEL",
+  GEMINI_NL_DEMO_FALLBACK_MODEL: "GEMINI_FALLBACK_MODEL_2",
   GEMINI_NL_DEMO_MAX_QUESTIONS: "NATURAL_LANGUAGE_DEMO_LIMIT",
 };
 
@@ -53,6 +57,11 @@ const schema = z.object({
     .min(1)
     .default("gemini-3.1-flash-lite"),
   GEMINI_NL_DEMO_MODEL: z.string().min(1).default("gemini-3.5-flash-lite"),
+  GEMINI_NL_DEMO_PRIMARY_MODEL: z.string().min(1).default("gemini-3.5-flash-lite"),
+  GEMINI_NL_DEMO_FALLBACK_MODEL: z.string().min(1).default("gemini-3.1-flash-lite"),
+  /** Interactive budget. Deliberately far below the scan timeout — nobody
+   *  should wait 40 seconds for an answer in a chat box. */
+  GEMINI_NL_DEMO_TIMEOUT_MS: intFrom(9_000, 1_000, 30_000),
   GEMINI_NL_DEMO_MAX_QUESTIONS: intFrom(3, 0, 100),
   GEMINI_MAX_RETRIES_PER_MODEL: intFrom(1, 0, 3),
   GEMINI_REQUEST_TIMEOUT_MS: intFrom(20_000, 1_000, 120_000),
@@ -66,6 +75,22 @@ const schema = z.object({
   SCAN_MAX_PER_SESSION_PER_HOUR: intFrom(10, 1, 1000),
 
   VERIFICATION_CHALLENGE_TTL_SECONDS: intFrom(300, 30, 3600),
+
+  /**
+   * Experimental visual scan assistance.
+   *
+   * Off by default and intended to stay off until browser rendering can be
+   * contained as strictly as the fetch path already is — see
+   * `src/lib/scanner/visual/page-renderer.ts`.
+   */
+  VISUAL_SCAN_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1")
+    .pipe(z.boolean()),
+  VISUAL_SCAN_MAX_IMAGES: intFrom(3, 0, 3),
+  VISUAL_SCAN_MAX_IMAGE_BYTES: intFrom(600_000, 10_000, 600_000),
+  VISUAL_SCAN_MAX_TOTAL_IMAGE_BYTES: intFrom(1_500_000, 10_000, 1_800_000),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -94,6 +119,16 @@ export function getEnv(): Env {
 
   cached = parsed.data;
   return cached;
+}
+
+/**
+ * Clears the parsed-environment cache.
+ *
+ * Only for tests, which need to exercise behaviour under different flag values
+ * within one process. Production reads the environment once on purpose.
+ */
+export function resetEnvCache(): void {
+  cached = undefined;
 }
 
 /** True when Gemini is configured. Semantic mapping degrades without it. */

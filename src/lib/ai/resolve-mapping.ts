@@ -138,12 +138,19 @@ function resolveList(
     return undefined;
   }
 
+  const nestedCount = label === "skills"
+    ? Object.values(group.fields).find(
+        (candidate) => candidate.selector === fields.items?.selector && candidate.source === fields.items?.source,
+      )?.nestedItemCount
+    : undefined;
+
   return {
     route: page.routePattern,
     itemSelector: group.itemSelector,
     ...(group.containerSelector ? { containerSelector: group.containerSelector } : {}),
     fields,
     expectedCount: group.count,
+    ...(nestedCount ? { expectedNestedCount: nestedCount } : {}),
   };
 }
 
@@ -283,6 +290,57 @@ function resolveContact(
 }
 
 /**
+ * Picks the contact form to expose, straight from the deterministic scan.
+ *
+ * The model has no say here at all. Form selectors are structural and
+ * security-relevant — they decide what the runtime will type into and submit —
+ * so they come only from Cheerio extraction that already verified them against
+ * the real document. A SUPPORTED form is preferred over an UNCERTAIN one.
+ */
+function resolveContactForm(
+  representation: ScanRepresentation,
+): SiteMapping["contactForm"] {
+  const candidates: Array<{ page: PageExtraction; form: NonNullable<PageExtraction["contact"]["forms"]>[number] }> = [];
+
+  for (const page of representation.pages) {
+    for (const form of page.contact.forms ?? []) {
+      if (form.support === "UNSUPPORTED") continue;
+      if (!form.fields.message) continue;
+      candidates.push({ page, form });
+    }
+  }
+
+  if (candidates.length === 0) return undefined;
+
+  candidates.sort((a, b) => {
+    const rank = (support: string) => (support === "SUPPORTED" ? 0 : 1);
+    const bySupport = rank(a.form.support) - rank(b.form.support);
+    if (bySupport !== 0) return bySupport;
+    // Prefer a page that is actually about contact.
+    const contactness = (page: PageExtraction) => (page.pageType === "CONTACT" ? 0 : 1);
+    return contactness(a.page) - contactness(b.page);
+  });
+
+  const chosen = candidates[0]!;
+  const message = chosen.form.fields.message;
+  if (!message) return undefined;
+
+  return {
+    route: chosen.page.routePattern,
+    formSelector: chosen.form.formSelector,
+    ...(chosen.form.submitSelector ? { submitSelector: chosen.form.submitSelector } : {}),
+    fields: {
+      message,
+      ...(chosen.form.fields.name ? { name: chosen.form.fields.name } : {}),
+      ...(chosen.form.fields.email ? { email: chosen.form.fields.email } : {}),
+      ...(chosen.form.fields.subject ? { subject: chosen.form.fields.subject } : {}),
+    },
+    support: chosen.form.support,
+    reasons: chosen.form.reasons,
+  };
+}
+
+/**
  * Resolves a validated model result against the scan. Never throws: an
  * unresolvable section simply does not appear in the mapping.
  */
@@ -299,6 +357,7 @@ export function resolveMapping(
   const profile = resolveProfile(representation, semantic.profile, warnings);
   const navigation = resolveNavigation(representation, semantic.navigation);
   const contact = resolveContact(representation, semantic.contact);
+  const contactForm = resolveContactForm(representation);
 
   const draft: SiteMapping = {
     version: 1,
@@ -311,6 +370,7 @@ export function resolveMapping(
     ...(experience ? { experience } : {}),
     ...(education ? { education } : {}),
     ...(contact ? { contact } : {}),
+    ...(contactForm ? { contactForm } : {}),
     ...(navigation ? { navigation } : {}),
   };
 
@@ -338,6 +398,11 @@ export function availableRequirements(mapping: SiteMapping): Set<DataRequirement
   if (mapping.education) available.add("education");
   if (mapping.contact) available.add("contact");
   if (mapping.navigation?.items.length) available.add("navigation");
+  // An UNSUPPORTED form is detected but unusable, so it must not make the
+  // contact-message capabilities selectable.
+  if (mapping.contactForm && mapping.contactForm.support !== "UNSUPPORTED") {
+    available.add("contact_form");
+  }
   return available;
 }
 
@@ -446,6 +511,7 @@ export function deriveHeuristicMapping(
       if (field) fields[role] = field;
     }
     if (Object.keys(fields).length === 0) return undefined;
+    const nestedCount = roles.items ? candidate.group.fields[roles.items]?.nestedItemCount : undefined;
     return {
       route: candidate.page.routePattern,
       itemSelector: candidate.group.itemSelector,
@@ -454,6 +520,7 @@ export function deriveHeuristicMapping(
         : {}),
       fields,
       expectedCount: candidate.group.count,
+      ...(nestedCount ? { expectedNestedCount: nestedCount } : {}),
     };
   };
 

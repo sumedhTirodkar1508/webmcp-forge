@@ -23,19 +23,29 @@ import type { WebMcpTool } from "@/lib/webmcp/types";
  */
 
 /** The operations the builder exposes, implemented once and shared. */
+/**
+ * The operations the builder exposes, implemented once and shared.
+ *
+ * Every site-scoped action takes an optional explicit `siteId`. A caller that
+ * has just changed the target passes the id it was handed rather than relying
+ * on React state having propagated — chaining `setTargetUrl` into `scan` is
+ * exactly where an implicit read of "the current site" silently scanned the
+ * site the user had navigated away from.
+ */
 export interface BuilderActions {
   getState: () => BuilderState;
   setTargetUrl: (url: string) => Promise<BuilderState>;
-  scan: () => Promise<BuilderState>;
+  scan: (siteId?: string) => Promise<BuilderState>;
   setCapabilityEnabled: (
     id: CapabilityId,
     enabled: boolean,
+    siteId?: string,
   ) => Promise<{ state: BuilderState; applied: boolean; message?: string }>;
-  generateInstallation: () => Promise<BuilderState>;
-  startVerification: () => Promise<{ verifyUrl: string }>;
+  generateInstallation: (siteId?: string) => Promise<BuilderState>;
+  startVerification: (siteId?: string) => Promise<{ verifyUrl: string }>;
   /** Reloads the server-authoritative builder state after an out-of-band event
    * such as the portfolio runtime's verification callback. */
-  refreshState: () => Promise<BuilderState>;
+  refreshState: (siteId?: string) => Promise<BuilderState>;
 }
 
 const NO_SITE = "No site is loaded yet. Call set_target_url with a portfolio address first.";
@@ -130,9 +140,14 @@ export function buildBuilderTools(actions: BuilderActions): WebMcpTool[] {
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: mutating,
       execute: async () => {
-        if (!actions.getState().siteId) return errorResult(NO_SITE);
+        // Read the site once and pass it explicitly, for the same reason the
+        // target form does: an agent may call scan_site immediately after
+        // set_target_url, and "whatever site is current" must not be resolved
+        // a second time in between.
+        const siteId = actions.getState().siteId;
+        if (!siteId) return errorResult(NO_SITE);
         try {
-          const state = await actions.scan();
+          const state = await actions.scan(siteId);
           return textResult(describeState(state), summarise(state));
         } catch (error) {
           return errorResult(error instanceof Error ? error.message : "The scan failed.");
@@ -253,7 +268,8 @@ export function buildBuilderTools(actions: BuilderActions): WebMcpTool[] {
             {
               scriptTag: state.installation.scriptTag,
               siteId: state.installation.publicId,
-              configVersion: state.installation.configVersion,
+              generatedVersion: state.installation.latestGeneratedVersion,
+              installedVersion: state.installation.installedVersion,
               enabledCapabilities: state.capabilities
                 .filter((capability) => capability.enabled)
                 .map((capability) => capability.toolName),

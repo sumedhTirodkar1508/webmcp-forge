@@ -23,6 +23,7 @@ const ALL_DATA: ReadonlySet<DataRequirement> = new Set<DataRequirement>([
   "education",
   "contact",
   "navigation",
+  "contact_form",
 ]);
 
 describe("CAPABILITY_CATALOGUE", () => {
@@ -38,22 +39,39 @@ describe("CAPABILITY_CATALOGUE", () => {
       "get_contact_info",
       "navigate_site",
       "focus_project",
+      "prepare_contact_message",
+      "send_contact_message",
     ];
 
-    expect(CAPABILITY_IDS.length).toBe(10);
-    expect(Object.keys(CAPABILITY_CATALOGUE).length).toBe(10);
+    expect(CAPABILITY_IDS.length).toBe(12);
+    expect(Object.keys(CAPABILITY_CATALOGUE).length).toBe(12);
     expect([...CAPABILITY_IDS].sort()).toEqual([...expectedIds].sort());
-    expect(CAPABILITY_LIST.length).toBe(10);
+    expect(CAPABILITY_LIST.length).toBe(12);
   });
 
-  it("marks navigate_site and focus_project as not read-only, and everything else read-only", () => {
+  it("marks every state- or view-changing capability as not read-only", () => {
+    // Anything that moves the page, or stages/submits a message, changes what
+    // the visitor sees or does. Claiming readOnlyHint for those would be a lie
+    // to the agent, so the set is asserted exactly.
+    const notReadOnly = new Set<CapabilityId>([
+      "navigate_site",
+      "focus_project",
+      "prepare_contact_message",
+      "send_contact_message",
+    ]);
+
     for (const capability of CAPABILITY_LIST) {
-      if (capability.id === "navigate_site" || capability.id === "focus_project") {
-        expect(capability.annotations.readOnlyHint).toBe(false);
-      } else {
-        expect(capability.annotations.readOnlyHint).toBe(true);
-      }
+      expect(capability.annotations.readOnlyHint).toBe(!notReadOnly.has(capability.id));
     }
+  });
+
+  it("keeps the consequential contact capabilities off by default", () => {
+    // Sending a message on someone's behalf is not something a scan should
+    // silently opt a portfolio owner into.
+    expect(CAPABILITY_CATALOGUE.prepare_contact_message.defaultEnabled).toBe(false);
+    expect(CAPABILITY_CATALOGUE.send_contact_message.defaultEnabled).toBe(false);
+    expect(CAPABILITY_CATALOGUE.prepare_contact_message.requires).toEqual(["contact_form"]);
+    expect(CAPABILITY_CATALOGUE.send_contact_message.requires).toEqual(["contact_form"]);
   });
 
   it("sets untrustedContentHint true on every entry", () => {
@@ -154,11 +172,16 @@ describe("recommendSettings", () => {
     }
   });
 
-  it("turns on capabilities whose requirements are satisfied", () => {
+  it("turns on capabilities whose requirements are satisfied, except opt-in ones", () => {
     const settings = recommendSettings(ALL_DATA);
     for (const capability of CAPABILITY_LIST) {
-      expect(settings[capability.id]).toBe(true);
+      // `defaultEnabled: false` means "available but not recommended" — the
+      // contact actions stay off even when the data for them exists.
+      expect(settings[capability.id]).toBe(capability.defaultEnabled);
     }
+    expect(settings.prepare_contact_message).toBe(false);
+    expect(settings.send_contact_message).toBe(false);
+    expect(settings.list_projects).toBe(true);
   });
 
   it("only enables capabilities whose specific requirement is present", () => {

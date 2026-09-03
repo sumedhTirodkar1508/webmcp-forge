@@ -1,5 +1,6 @@
 import type { RuntimeConfig } from "@/lib/runtime-config";
 import { RUNTIME_VERSION } from "@/lib/runtime-version";
+import type { ExecuteToolOutcome } from "@/lib/webmcp/client";
 import {
   checkWebMcpAvailability,
   registerTools,
@@ -7,6 +8,7 @@ import {
   listRegisteredTools,
 } from "@/lib/webmcp/client";
 import { parseRuntimeConfig } from "@/runtime/config-guard";
+import { startLiveTest, takeLiveTestToken } from "@/runtime/live-test";
 import {
   buildTools,
   capabilityIsSatisfied,
@@ -39,6 +41,8 @@ const VERIFY_PARAM = "__wmf_verify";
 interface RuntimeState {
   version: string;
   siteId: string | null;
+  /** The version pinned by the snippet — the only configuration that may run. */
+  pinnedVersion: number | null;
   configVersion: number | null;
   status: "loading" | "ready" | "error" | "idle";
   error?: string;
@@ -72,7 +76,7 @@ interface ForgeRuntimeApi {
   invokeViaWebMcp: (
     name: string,
     input?: Record<string, unknown>,
-  ) => Promise<{ ok: true; result: string } | { ok: false; message: string } | null>;
+  ) => Promise<ExecuteToolOutcome>;
   /**
    * Calls the underlying handler directly, bypassing WebMCP. A diagnostic aid
    * only — this is NOT agent-mediated invocation and must never be presented
@@ -98,11 +102,23 @@ function log(message: string, detail?: unknown): void {
   else console.warn(`[webmcp-forge] ${message}`, detail);
 }
 
+/**
+ * Loads the EXACT configuration version this website pins.
+ *
+ * The version comes from `data-wmf-config` in the installed snippet, and the
+ * server serves that version or nothing. There is deliberately no fallback to
+ * "latest": anyone can generate a configuration in Forge, so the pinned
+ * version is what stops someone else's newly generated config from executing
+ * on this site. Failing loudly is the correct behaviour.
+ */
 async function fetchConfig(
   forgeOrigin: string,
   siteId: string,
+  version: number,
 ): Promise<RuntimeConfig | null> {
-  const endpoint = `${forgeOrigin}/api/public/sites/${encodeURIComponent(siteId)}/config`;
+  const endpoint =
+    `${forgeOrigin}/api/public/sites/${encodeURIComponent(siteId)}/config` +
+    `?version=${encodeURIComponent(String(version))}`;
   try {
     const response = await fetch(endpoint, {
       method: "GET",
@@ -111,7 +127,10 @@ async function fetchConfig(
       headers: { accept: "application/json" },
     });
     if (!response.ok) {
-      log(`configuration unavailable (status ${response.status})`);
+      log(
+        `configuration version ${version} could not be loaded (status ${response.status}). ` +
+          "Check the data-wmf-config value in your installation snippet.",
+      );
       return null;
     }
     return parseRuntimeConfig(await response.json());
@@ -119,6 +138,14 @@ async function fetchConfig(
     log("could not reach WebMCP Forge to load configuration");
     return null;
   }
+}
+
+/** Reads the pinned version from the snippet. Returns null when unusable. */
+function readPinnedVersion(script: HTMLScriptElement): number | null {
+  const raw = script.dataset.wmfConfig;
+  if (!raw || !/^\d{1,7}$/.test(raw)) return null;
+  const version = Number(raw);
+  return version >= 1 ? version : null;
 }
 
 function start(): void {
@@ -130,6 +157,7 @@ function start(): void {
   const state: RuntimeState = {
     version: RUNTIME_VERSION,
     siteId,
+    pinnedVersion: null,
     configVersion: null,
     status: "loading",
     webmcp: checkWebMcpAvailability(),
@@ -206,12 +234,36 @@ function start(): void {
     }
   };
 
+  const pinnedVersion = readPinnedVersion(script);
+  state.pinnedVersion = pinnedVersion;
+
+  if (pinnedVersion === null) {
+    state.status = "error";
+    state.error = "missing or invalid data-wmf-config";
+    log(
+      "this script tag has no valid data-wmf-config attribute, so there is no " +
+        "configuration version to load. Re-copy the snippet from WebMCP Forge.",
+    );
+    return;
+  }
+
   void (async () => {
-    config = await fetchConfig(forgeOrigin, siteId);
+    config = await fetchConfig(forgeOrigin, siteId, pinnedVersion);
 
     if (!config) {
       state.status = "error";
-      state.error = "no published configuration";
+      state.error = `configuration version ${pinnedVersion} unavailable`;
+      return;
+    }
+
+    if (config.configVersion !== pinnedVersion) {
+      // The server must never substitute a different version.
+      state.status = "error";
+      state.error = "configuration version mismatch";
+      log(
+        `expected configuration version ${pinnedVersion} but received ` +
+          `${config.configVersion}; refusing to register tools.`,
+      );
       return;
     }
 
@@ -250,6 +302,12 @@ function start(): void {
     });
 
     await maybeVerify(forgeOrigin, config, context, state);
+
+    // Live agent test mode. Deliberately last, and deliberately gated on a
+    // token the owner just generated: an ordinary page view never reaches
+    // this, so the ordinary runtime never polls Forge.
+    const liveToken = takeLiveTestToken();
+    if (liveToken) startLiveTest(forgeOrigin, siteId, liveToken);
   })();
 }
 
@@ -325,6 +383,8 @@ async function maybeVerify(
     challenge,
     runtimeVersion: RUNTIME_VERSION,
     configVersion: config.configVersion,
+    // What the snippet asked for, so verification can flag a drifted pin.
+    pinnedVersion: state.pinnedVersion,
     path: window.location.pathname,
     webmcpAvailable: state.webmcp.available,
     webmcpReason: state.webmcp.reason ?? null,
@@ -344,15 +404,30 @@ async function maybeVerify(
   };
 
   try {
-    await fetch(`${forgeOrigin}/api/public/verify`, {
+    const response = await fetch(`${forgeOrigin}/api/public/verify`, {
       method: "POST",
       credentials: "omit",
       mode: "cors",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
+
+    if (!response.ok) {
+      // A rejected callback used to be indistinguishable from never running,
+      // so the builder blamed popup blocking. Say what actually happened, in
+      // the console of the page that is failing.
+      const detail = await response
+        .json()
+        .then((body: { error?: { message?: string } }) => body?.error?.message)
+        .catch(() => undefined);
+      log(
+        `WebMCP Forge rejected this verification report (status ${response.status}). ${detail ?? ""}`.trim(),
+      );
+      state.error = `verification rejected: ${response.status}`;
+    }
   } catch {
     log("could not report verification results back to WebMCP Forge");
+    state.error = "verification callback failed";
   }
 }
 

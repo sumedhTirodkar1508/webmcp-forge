@@ -66,24 +66,13 @@ export async function loadCurrentSettings(
   const artifacts = await loadScanArtifacts(site.id);
   if (!artifacts) return null;
 
-  const draft = await prisma.configVersion.findFirst({
-    where: { siteId: site.id },
-    orderBy: { version: "desc" },
-  });
-
-  if (!draft) return artifacts;
-
-  const config = draft.runtimeConfig as Record<string, unknown>;
-  const enabled = Array.isArray(config.enabledCapabilities)
-    ? (config.enabledCapabilities as string[])
-    : [];
-
-  // The mapping always comes from the newest scan — a published config can be
-  // older than the structure it describes.
-  const settings: CapabilitySettings = {};
-  for (const capability of CAPABILITY_LIST) {
-    settings[capability.id] = enabled.includes(capability.id);
-  }
+  // The working draft is what the builder is editing. Config versions are
+  // immutable snapshots of past decisions and must not be read back as
+  // "current" — doing so made the newest generated version look active.
+  const available = availableRequirements(artifacts.mapping);
+  const settings = site.draftSettings
+    ? normalizeSettings(site.draftSettings, available)
+    : artifacts.settings;
 
   return { mapping: artifacts.mapping, settings };
 }
@@ -149,7 +138,13 @@ export async function setCapabilityEnabled(
   }
 
   const settings: CapabilitySettings = { ...current.settings, [capabilityId]: enabled };
-  await persistDraft(site, current.mapping, settings);
+
+  // Editing a toggle is not a deployment decision. It updates the working
+  // draft; only an explicit generate action appends an immutable version.
+  await prisma.site.update({
+    where: { id: site.id },
+    data: { draftSettings: asJson(settings) },
+  });
 
   return {
     capabilities: describeCapabilities(current.mapping, settings),
@@ -186,52 +181,81 @@ export function serializeRuntimeConfig(input: {
 }
 
 /** Writes a new immutable version without publishing it. */
-async function persistDraft(
+/**
+ * Appends the next immutable configuration version.
+ *
+ * Two generations racing for the same site must receive two distinct versions
+ * rather than colliding, so a unique-violation on `(siteId, version)` is
+ * retried against a freshly read maximum. Existing rows are never updated —
+ * a version is a permanent record of something a website may be pinned to.
+ */
+async function appendConfigVersion(
   site: Site,
   mapping: SiteMapping,
   settings: CapabilitySettings,
 ): Promise<ConfigVersion> {
-  const latest = await prisma.configVersion.findFirst({
-    where: { siteId: site.id },
-    orderBy: { version: "desc" },
-    select: { version: true },
-  });
-  const version = (latest?.version ?? 0) + 1;
+  const MAX_ATTEMPTS = 5;
 
-  return prisma.configVersion.create({
-    data: {
-      siteId: site.id,
-      version,
-      runtimeConfig: asJson(
-        serializeRuntimeConfig({
-          publicId: site.publicId,
-          origin: site.origin,
-          configVersion: version,
-          mapping,
-          settings,
-          generatedAt: new Date(),
-        }),
-      ),
-    },
-  });
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    const latest = await prisma.configVersion.findFirst({
+      where: { siteId: site.id },
+      orderBy: { version: "desc" },
+      select: { version: true },
+    });
+    const version = (latest?.version ?? 0) + 1;
+
+    try {
+      return await prisma.configVersion.create({
+        data: {
+          siteId: site.id,
+          version,
+          publishedAt: new Date(),
+          runtimeConfig: asJson(
+            serializeRuntimeConfig({
+              publicId: site.publicId,
+              origin: site.origin,
+              configVersion: version,
+              mapping,
+              settings,
+              generatedAt: new Date(),
+            }),
+          ),
+        },
+      });
+    } catch (error) {
+      const raced =
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "P2002";
+      if (!raced || attempt === MAX_ATTEMPTS - 1) throw error;
+      // Someone else took this number; read the new maximum and try again.
+    }
+  }
+
+  throw new AppError("CONFLICT", "Could not allocate a configuration version.");
 }
 
-export interface PublishResult {
+export interface GenerateResult {
   site: Site;
   configVersion: ConfigVersion;
   runtimeConfig: RuntimeConfig;
 }
 
 /**
- * Freezes the current settings into a version and makes it the published one.
+ * Freezes the current draft into a new immutable configuration version.
  *
- * This is what the Generate Installation button — and the `generate_installation`
- * WebMCP tool — call.
+ * Deliberately does NOT mark anything active. Generating a configuration in
+ * Forge must never change what a live website executes — the website pins the
+ * version it runs in `data-wmf-config`, so a configuration only takes effect
+ * once someone with deployment access to that website updates the snippet.
+ *
+ * That is what makes an ownership model unnecessary in this MVP: a stranger
+ * can generate v3, but the site keeps running the v2 it pins.
  */
-export async function publishConfiguration(
+export async function generateConfiguration(
   session: BuilderSession,
   siteId: string,
-): Promise<PublishResult> {
+): Promise<GenerateResult> {
   const site = await requireOwnedSiteFor(session, siteId);
   const current = await loadCurrentSettings(site);
 
@@ -242,61 +266,59 @@ export async function publishConfiguration(
     );
   }
 
-  const configVersion = await persistDraft(site, current.mapping, current.settings);
+  const configVersion = await appendConfigVersion(site, current.mapping, current.settings);
 
-  const published = await prisma.site.update({
+  const updated = await prisma.site.update({
     where: { id: site.id },
-    data: {
-      publishedConfigVersionId: configVersion.id,
-      status: "PUBLISHED",
-    },
-  });
-
-  const stamped = await prisma.configVersion.update({
-    where: { id: configVersion.id },
-    data: { publishedAt: new Date() },
+    data: { status: "PUBLISHED" },
   });
 
   return {
-    site: published,
-    configVersion: stamped,
-    runtimeConfig: stamped.runtimeConfig as unknown as RuntimeConfig,
+    site: updated,
+    configVersion,
+    runtimeConfig: configVersion.runtimeConfig as unknown as RuntimeConfig,
   };
 }
 
 /**
- * The published configuration for a public site id, or null.
+ * Returns one EXACT configuration version for a public site id.
  *
- * The only path by which configuration reaches the public internet. Drafts are
- * unreachable from here by construction: it reads through
- * `Site.publishedConfigVersionId`, which only `publishConfiguration` sets.
+ * There is deliberately no "latest" fallback. A website pins the version it
+ * runs, and silently serving a different one would mean a configuration nobody
+ * deployed started executing on a live site. A missing version is an error the
+ * runtime surfaces, not something to paper over.
  */
-export async function getPublishedConfig(
+export async function getConfigVersion(
   publicId: string,
+  version: number,
 ): Promise<{ config: RuntimeConfig; origin: string; publishedAt: Date | null } | null> {
   const site = await prisma.site.findUnique({
     where: { publicId },
-    select: {
-      origin: true,
-      publishedConfigVersion: {
-        select: { runtimeConfig: true, publishedAt: true },
-      },
-    },
+    select: { id: true, origin: true },
   });
+  if (!site) return null;
 
-  const version = site?.publishedConfigVersion;
-  if (!site || !version) return null;
+  const row = await prisma.configVersion.findUnique({
+    where: { siteId_version: { siteId: site.id, version } },
+    select: { runtimeConfig: true, publishedAt: true },
+  });
+  if (!row) return null;
 
-  // Publishing constructs this payload locally, but the route is a public
-  // trust boundary and database JSON is still untrusted input when it is read
-  // back. A malformed/manual row must fail closed rather than become a runtime
-  // configuration or leak a shape we no longer intend to serve.
-  const parsed = runtimeConfigSchema.safeParse(version.runtimeConfig);
+  // The route is a public trust boundary and database JSON is untrusted input
+  // when read back, so a malformed row fails closed rather than becoming a
+  // runtime configuration.
+  const parsed = runtimeConfigSchema.safeParse(row.runtimeConfig);
   if (!parsed.success) return null;
 
-  return {
-    config: parsed.data,
-    origin: site.origin,
-    publishedAt: version.publishedAt,
-  };
+  return { config: parsed.data, origin: site.origin, publishedAt: row.publishedAt };
+}
+
+/** The highest version generated for a site, for display only. */
+export async function getLatestGeneratedVersion(siteId: string): Promise<number | null> {
+  const latest = await prisma.configVersion.findFirst({
+    where: { siteId },
+    orderBy: { version: "desc" },
+    select: { version: true },
+  });
+  return latest?.version ?? null;
 }

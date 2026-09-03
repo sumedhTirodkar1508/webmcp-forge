@@ -18,9 +18,12 @@ import {
   safeQueryAll,
   searchItems,
 } from "@/runtime/dom-extract";
+import { buildTools, collectLiveCounts } from "@/runtime/tools";
 
 import {
   PORTFOLIO_ORIGIN,
+  buildRuntimeConfig,
+  buildSiteMapping,
   buildProjectsMapping,
   createDocument,
   portfolioHtml,
@@ -94,6 +97,99 @@ describe("modern component mapping in the live DOM", () => {
   it("returns skill category values as a readable delimited list", () => {
     const result = extractList(doc, mapping.skills!, "https://components.example/");
     expect(result.items[0]?.fields.items).toBe("TypeScript, Python");
+  });
+});
+
+describe("grouped skills in the live DOM", () => {
+  const html = readFileSync(join(process.cwd(), "tests/fixtures/grouped-skills.html"), "utf8");
+  const doc = createDocument(html);
+  const skillsMapping = {
+    route: "*",
+    itemSelector: ".skill-group",
+    fields: {
+      category: { selector: "h3", source: "text" as const },
+      items: { selector: "ul", source: "text" as const },
+    },
+    expectedCount: 6,
+    expectedNestedCount: 43,
+  };
+  const config = buildRuntimeConfig({ mapping: buildSiteMapping({ skills: skillsMapping }) });
+  const context = { config, doc, currentUrl: () => "https://jordanrivera.dev/" };
+
+  it("keeps comma-readable values and adds structured leaf arrays", () => {
+    const extracted = extractList(doc, skillsMapping, BASE_URL);
+    expect(extracted.items).toHaveLength(6);
+    expect(extracted.items[0]?.fields.items).toBe("Java, TypeScript, JavaScript, SQL, Python");
+    expect(extracted.items[0]?.listFields?.items).toEqual([
+      "Java", "TypeScript", "JavaScript", "SQL", "Python",
+    ]);
+  });
+
+  /**
+   * The outer/nested distinction.
+   *
+   * `#skills > ul` has six direct `li` children, and each of those is a skill
+   * GROUP CARD containing its own nested `ul` of individual skills. The two
+   * levels count different things:
+   *
+   *   outer `li` → skill groups   (6)
+   *   nested `li` → leaf skills   (43)
+   *
+   * A manual DevTools test once appended an `li` to the OUTER list and read
+   * the resulting 6 → 7 as a runtime bug. It was not: appending there really
+   * does create a seventh group. Each mutation below therefore gets its own
+   * document and its own name, so which level is being changed — and what
+   * that is supposed to do — is impossible to misread.
+   */
+  it("reports 43 leaf skills across 6 groups", async () => {
+    expect(collectLiveCounts(context)).toMatchObject({ skills: 43, skillGroups: 6 });
+
+    const skillTool = buildTools(context).find((tool) => tool.name === "get_skills");
+    const result = await skillTool?.execute({}, { signal: new AbortController().signal });
+    expect(result).toMatchObject({ structuredContent: { totalSkills: 43, totalGroups: 6 } });
+    expect(
+      (result as { structuredContent?: { groups?: Array<{ category: string; skills: string[] }> } })
+        .structuredContent?.groups?.[0],
+    ).toMatchObject({
+      category: "Programming Languages",
+      skills: expect.arrayContaining(["Java", "TypeScript"]),
+    });
+  });
+
+  it("adding a NESTED li adds one leaf skill and leaves the group count alone", () => {
+    // The live-DOM guarantee: no re-scan, no new config, no Gemini call.
+    const freshDoc = createDocument(html);
+    const fresh = { config, doc: freshDoc, currentUrl: () => "https://jordanrivera.dev/" };
+    expect(collectLiveCounts(fresh)).toMatchObject({ skills: 43, skillGroups: 6 });
+
+    // A nested list is the skills INSIDE one group card.
+    const nestedList = freshDoc.querySelector(".skill-group ul");
+    nestedList?.append(Object.assign(freshDoc.createElement("li"), { textContent: "Rust" }));
+
+    expect(collectLiveCounts(fresh)).toMatchObject({ skills: 44, skillGroups: 6 });
+  });
+
+  it("adding an OUTER li adds a whole group — this is correct, not a bug", () => {
+    const freshDoc = createDocument(html);
+    const fresh = { config, doc: freshDoc, currentUrl: () => "https://jordanrivera.dev/" };
+    expect(collectLiveCounts(fresh)).toMatchObject({ skills: 43, skillGroups: 6 });
+
+    // The outer list holds the group cards themselves, so a new child here is
+    // a new group — exactly what the misread DevTools test did.
+    const groups = freshDoc.querySelector(".skill-groups");
+    groups?.insertAdjacentHTML(
+      "beforeend",
+      '<li class="skill-group"><h3>Other</h3><ul><li>Systems thinking</li><li>Writing</li></ul></li>',
+    );
+
+    expect(collectLiveCounts(fresh)).toMatchObject({ skills: 45, skillGroups: 7 });
+  });
+
+  it("counts flat skill lists as individual skills without inventing groups", () => {
+    const flatDoc = createDocument("<ul class=skills><li>Java</li><li>React</li><li>PostgreSQL</li></ul>");
+    const flat = { ...context, doc: flatDoc, config: buildRuntimeConfig({ mapping: buildSiteMapping({ skills: { route: "*", itemSelector: ".skills li", fields: { title: { selector: "", source: "text" } } } }) }) };
+    expect(collectLiveCounts(flat)).toMatchObject({ skills: 3 });
+    expect(collectLiveCounts(flat).skillGroups).toBeUndefined();
   });
 });
 

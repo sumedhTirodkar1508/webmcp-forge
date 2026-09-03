@@ -30,6 +30,11 @@ export function CapabilitiesSection() {
       lockedHint="Scan your site to see available capabilities."
       highlighted={lastChanged?.startsWith("capability:") ?? false}
     >
+      <p aria-live="polite" className="sr-only">
+        {lastChanged?.startsWith("capability:")
+          ? `${lastChanged.slice("capability:".length)} updated.`
+          : ""}
+      </p>
       <div className="flex flex-col divide-y divide-border">
         {capabilities.map((capability) => {
           const rowHighlighted = lastChanged === `capability:${capability.id}`;
@@ -50,7 +55,12 @@ export function CapabilitiesSection() {
                     </Badge>
                   )}
                 </div>
-                <p className="text-sm text-muted-foreground">{capability.description}</p>
+                <p
+                  id={`capability-desc-${capability.id}`}
+                  className="text-sm text-muted-foreground"
+                >
+                  {capability.description}
+                </p>
                 {!capability.supported && (
                   <p className="text-xs text-muted-foreground">Not found on your site.</p>
                 )}
@@ -62,6 +72,7 @@ export function CapabilitiesSection() {
                   void actions.setCapabilityEnabled(capability.id, next);
                 }}
                 aria-label={`Toggle ${capability.label}`}
+                aria-describedby={`capability-desc-${capability.id}`}
                 className="mt-0.5 shrink-0"
               />
             </div>

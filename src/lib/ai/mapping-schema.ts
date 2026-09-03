@@ -78,6 +78,8 @@ export const listMappingSchema = z.object({
   fields: z.record(z.string().max(40), fieldMappingSchema),
   /** What the scan saw, so verification can spot a mapping that has broken. */
   expectedCount: z.number().int().min(0).max(10_000).optional(),
+  /** Deterministic count of nested leaf values (for grouped lists such as skills). */
+  expectedNestedCount: z.number().int().min(0).max(100_000).optional(),
 });
 
 export type ListMapping = z.infer<typeof listMappingSchema>;
@@ -129,6 +131,33 @@ export const contactMappingSchema = z.object({
  * education section simply has no education mapping, and the corresponding
  * capability is recommended off.
  */
+/**
+ * A contact form the runtime may fill in on the visitor's behalf.
+ *
+ * Every selector here is produced by the deterministic scanner and verified
+ * against the scanned document — the model never authors one. `support`
+ * records why a form was accepted or refused, so the builder can explain
+ * itself rather than silently offering (or withholding) the capability.
+ *
+ * This mapping describes only WHERE the fields are. No message content is
+ * ever stored in it, or anywhere else in WebMCP Forge.
+ */
+export const contactFormMappingSchema = z.object({
+  route: routeMatch,
+  formSelector: selector,
+  submitSelector: selector.optional(),
+  fields: z.object({
+    name: selector.optional(),
+    email: selector.optional(),
+    subject: selector.optional(),
+    message: selector,
+  }),
+  support: z.enum(["SUPPORTED", "UNSUPPORTED", "UNCERTAIN"]),
+  reasons: z.array(z.string().max(200)).max(10).default([]),
+});
+
+export type ContactFormMapping = z.infer<typeof contactFormMappingSchema>;
+
 export const siteMappingSchema = z.object({
   version: z.literal(1),
   profile: singleMappingSchema.optional(),
@@ -140,6 +169,7 @@ export const siteMappingSchema = z.object({
   experience: listMappingSchema.optional(),
   education: listMappingSchema.optional(),
   contact: contactMappingSchema.optional(),
+  contactForm: contactFormMappingSchema.optional(),
   navigation: navigationMappingSchema.optional(),
 });
 

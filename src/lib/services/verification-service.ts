@@ -42,7 +42,8 @@ export async function createVerificationChallenge(
 ): Promise<ChallengeIssue> {
   const site = await requireOwnedSiteFor(session, siteId);
 
-  if (!site.publishedConfigVersionId) {
+  const generated = await prisma.configVersion.count({ where: { siteId: site.id } });
+  if (generated === 0) {
     throw new AppError(
       "NO_PUBLISHED_CONFIG",
       "Generate your installation snippet before checking the installation.",
@@ -78,6 +79,8 @@ export interface VerificationReport {
   webmcpAvailable: boolean;
   webmcpReason: string | null;
   toolsRegistered: number;
+  /** The version the snippet asked for; null when the attribute is missing. */
+  pinnedVersion: number | null;
   toolNames: string[];
   toolsVisibleToBrowser: string[];
   toolRegistrationFailures: Array<{ name: string; message: string }>;
@@ -135,14 +138,15 @@ export async function recordVerification(
     throw new AppError("VERIFICATION_CONSUMED", "That verification link has already been used.");
   }
 
-  const publishedVersion = challenge.site.publishedConfigVersionId
-    ? await prisma.configVersion.findUnique({
-        where: { id: challenge.site.publishedConfigVersionId },
-        select: { id: true, version: true },
-      })
-    : null;
+  // Verification describes whatever version the RUNTIME actually loaded — the
+  // one the website pins. There is no server-side "current" version to compare
+  // against, because generating a configuration does not deploy it.
+  const loadedVersion = await prisma.configVersion.findUnique({
+    where: { siteId_version: { siteId: challenge.siteId, version: report.configVersion } },
+    select: { id: true, version: true },
+  });
 
-  const diagnostics = buildVerificationDiagnostics(report, publishedVersion?.version ?? null);
+  const diagnostics = buildVerificationDiagnostics(report);
   const outcome = diagnostics.some((d) => d.status === "fail")
     ? "FAILED"
     : diagnostics.some((d) => d.status === "warn")
@@ -153,7 +157,7 @@ export async function recordVerification(
     data: {
       siteId: challenge.siteId,
       challengeId: challenge.id,
-      configVersionId: publishedVersion?.id ?? null,
+      configVersionId: loadedVersion?.id ?? null,
       runtimeVersion: report.runtimeVersion,
       reportedOrigin: requestOrigin,
       reportedPath: report.path,
@@ -161,15 +165,21 @@ export async function recordVerification(
       toolsRegistered: report.toolsRegistered,
       liveCounts: asJson(report.liveCounts),
       diagnostics: asJson(diagnostics),
+      // Kept as structured data as well as prose: the readiness assistant and
+      // the insights panel need the counts, not the rendered sentences.
+      toolRegistry: asJson({
+        existingTools: report.existingTools,
+        conflictingTools: report.conflictingTools,
+        forgeRegistered: report.toolNames,
+        visibleToBrowser: report.toolsVisibleToBrowser,
+        failures: report.toolRegistrationFailures,
+      }),
       outcome,
     },
   });
 }
 
-export function buildVerificationDiagnostics(
-  report: VerificationReport,
-  expectedConfigVersion: number | null,
-): VerificationDiagnostic[] {
+export function buildVerificationDiagnostics(report: VerificationReport): VerificationDiagnostic[] {
   const diagnostics: VerificationDiagnostic[] = [
     {
       id: "runtime",
@@ -180,19 +190,26 @@ export function buildVerificationDiagnostics(
   ];
 
   diagnostics.push(
-    expectedConfigVersion === null || report.configVersion === expectedConfigVersion
+    report.pinnedVersion === null
       ? {
           id: "config",
           label: "Configuration loaded",
-          status: "pass",
-          detail: `version ${report.configVersion}`,
-        }
-      : {
-          id: "config",
-          label: "Configuration loaded",
           status: "warn",
-          detail: `the page is using version ${report.configVersion}; the current version is ${expectedConfigVersion}. It may still be cached.`,
-        },
+          detail:
+            "the snippet has no data-wmf-config version. Re-copy it from Forge so the site pins the configuration it should run.",
+        }
+      : report.pinnedVersion !== report.configVersion
+        ? {
+            id: "config",
+            label: "Configuration loaded",
+            status: "fail",
+            detail: `the snippet pins version ${report.pinnedVersion} but version ${report.configVersion} was loaded.`,
+          }
+        : {
+            id: "config",
+            label: `Configuration loaded — version ${report.configVersion}`,
+            status: "pass",
+          },
   );
 
   if (report.conflictingTools.length > 0) {
@@ -201,6 +218,15 @@ export function buildVerificationDiagnostics(
       label: `${report.conflictingTools.length} generated tool name${report.conflictingTools.length === 1 ? " conflicts" : "s conflict"} with tools already provided by this site`,
       status: "warn",
       detail: `left untouched: ${report.conflictingTools.join(", ")}`,
+    });
+  }
+
+  if (report.existingTools.length > 0) {
+    diagnostics.push({
+      id: "existing_tools",
+      label: `Your portfolio already exposes ${report.existingTools.length} WebMCP tool${report.existingTools.length === 1 ? "" : "s"}`,
+      status: "pass",
+      detail: report.existingTools.join(", "),
     });
   }
 
@@ -239,7 +265,7 @@ export function buildVerificationDiagnostics(
     report.toolsRegistered > 0
       ? {
           id: "tools",
-          label: `${report.toolsRegistered} agent tool${report.toolsRegistered === 1 ? "" : "s"} registered`,
+          label: `Forge added ${report.toolsRegistered} WebMCP tool${report.toolsRegistered === 1 ? "" : "s"}`,
           status: "pass",
           detail: report.toolNames.join(", "),
         }
@@ -253,7 +279,29 @@ export function buildVerificationDiagnostics(
         },
   );
 
+  if (report.toolsVisibleToBrowser.length > 0) {
+    diagnostics.push({
+      id: "browser_tools",
+      label: `${report.toolsVisibleToBrowser.length} total WebMCP tool${report.toolsVisibleToBrowser.length === 1 ? "" : "s"} visible to the browser`,
+      status: "pass",
+      detail: report.toolsVisibleToBrowser.join(", "),
+    });
+  }
+
+  const skillCount = report.liveCounts.skills;
+  const skillGroups = report.liveCounts.skillGroups;
+  if (skillCount !== undefined) {
+    diagnostics.push({
+      id: "count_skills",
+      label: skillGroups === undefined
+        ? `${skillCount} skills found on the page`
+        : `${skillCount} skills across ${skillGroups} ${skillGroups === 1 ? "group" : "groups"} found on the page`,
+      status: skillCount > 0 ? "pass" : "fail",
+      detail: skillCount === 0 ? "the saved mapping matched nothing" : undefined,
+    });
+  }
   for (const [key, count] of Object.entries(report.liveCounts)) {
+    if (key === "skills" || key === "skillGroups") continue;
     diagnostics.push({
       id: `count_${key}`,
       label: `${count} ${key} found on the page`,

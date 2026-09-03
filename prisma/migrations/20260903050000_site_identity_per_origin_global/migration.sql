@@ -1,0 +1,25 @@
+-- Make a website's origin its identity, at the database level.
+--
+-- ============================================================================
+-- THIS MIGRATION WILL FAIL WHILE DUPLICATE ORIGINS EXIST.
+-- ============================================================================
+--
+-- That is deliberate. It must not run until a human has decided which row is
+-- canonical for each duplicated origin and reparented the other's history,
+-- because choosing automatically would silently discard scan, configuration
+-- and verification history — and could change the public_id that is already
+-- installed in a live website.
+--
+-- Check first (read-only):
+--
+--   SELECT origin, COUNT(*)
+--   FROM sites
+--   GROUP BY origin
+--   HAVING COUNT(*) > 1;
+--
+-- If that returns no rows, this migration is safe to apply.
+-- The reparenting SQL for any duplicates is documented in
+-- `docs/site-identity-cleanup.md`.
+
+-- CreateIndex
+CREATE UNIQUE INDEX "sites_origin_key" ON "sites"("origin");

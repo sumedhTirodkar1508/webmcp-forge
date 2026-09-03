@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { hasDatabase } from "../setup/env";
+import { hasTestDatabase, pointPrismaAtTestDatabase } from "../setup/env";
 
 /**
  * Verification challenge and public-configuration boundary tests.
@@ -17,7 +17,10 @@ import { hasDatabase } from "../setup/env";
  * Against the real database, for the same reason as `ownership.test.ts`.
  */
 
-const describeDb = hasDatabase() ? describe : describe.skip;
+// These suites mutate rows, so they run ONLY against an ephemeral
+// TEST_DATABASE_URL — never against the application's own DATABASE_URL.
+const describeDb = hasTestDatabase() ? describe : describe.skip;
+if (hasTestDatabase()) pointPrismaAtTestDatabase();
 
 describeDb("verification and the public boundary", () => {
   let prisma: typeof import("@/lib/prisma").prisma;
@@ -27,7 +30,10 @@ describeDb("verification and the public boundary", () => {
   let hashToken: typeof import("@/lib/tokens").hashToken;
 
   const sessionIds: string[] = [];
-  const ORIGIN = "https://portfolio.example";
+  // Origin is globally unique now, so each fixture site needs its own.
+  const RUN = Math.random().toString(36).slice(2, 8);
+  let siteCounter = 0;
+  const nextOrigin = () => `https://portfolio-${RUN}-${siteCounter++}.example`;
 
   beforeAll(async () => {
     ({ prisma } = await import("@/lib/prisma"));
@@ -38,6 +44,9 @@ describeDb("verification and the public boundary", () => {
 
   afterAll(async () => {
     if (sessionIds.length > 0) {
+      // Sites deliberately outlive their creating session now, so they must
+      // be removed explicitly or they collide on the unique origin.
+      await prisma.site.deleteMany({ where: { createdBySessionId: { in: sessionIds } } });
       await prisma.builderSession.deleteMany({ where: { id: { in: sessionIds } } });
     }
   });
@@ -51,23 +60,29 @@ describeDb("verification and the public boundary", () => {
     });
     sessionIds.push(session.id);
 
+    const origin = nextOrigin();
+
     return prisma.site.create({
       data: {
         publicId: generatePublicSiteId(),
         createdBySessionId: session.id,
-        canonicalUrl: `${ORIGIN}/`,
-        origin: ORIGIN,
+        canonicalUrl: `${origin}/`,
+        origin,
       },
     });
   }
 
   async function issueChallenge(siteId: string, expiresInMs = 60_000) {
     const challenge = generateToken();
+    const owner = await prisma.site.findUniqueOrThrow({
+      where: { id: siteId },
+      select: { origin: true },
+    });
     await prisma.verificationChallenge.create({
       data: {
         siteId,
         challengeHash: hashToken(challenge),
-        expectedOrigin: ORIGIN,
+        expectedOrigin: owner.origin,
         expiresAt: new Date(Date.now() + expiresInMs),
       },
     });
@@ -79,6 +94,8 @@ describeDb("verification and the public boundary", () => {
     challenge,
     runtimeVersion: "1.0.0",
     configVersion: 1,
+    // The version the snippet pinned.
+    pinnedVersion: 1,
     path: "/",
     webmcpAvailable: true,
     webmcpReason: null,
@@ -106,7 +123,7 @@ describeDb("verification and the public boundary", () => {
     const site = await newSite();
     const challenge = await issueChallenge(site.id);
 
-    const run = await recordVerification(report(site.publicId, challenge), ORIGIN);
+    const run = await recordVerification(report(site.publicId, challenge), site.origin);
     expect(run.siteId).toBe(site.id);
     expect(run.webmcpAvailable).toBe(true);
     expect(run.toolsRegistered).toBe(3);
@@ -116,9 +133,9 @@ describeDb("verification and the public boundary", () => {
     const site = await newSite();
     const challenge = await issueChallenge(site.id);
 
-    await recordVerification(report(site.publicId, challenge), ORIGIN);
+    await recordVerification(report(site.publicId, challenge), site.origin);
 
-    await expect(recordVerification(report(site.publicId, challenge), ORIGIN)).rejects.toMatchObject(
+    await expect(recordVerification(report(site.publicId, challenge), site.origin)).rejects.toMatchObject(
       { code: "VERIFICATION_CONSUMED" },
     );
   });
@@ -128,9 +145,9 @@ describeDb("verification and the public boundary", () => {
     const challenge = await issueChallenge(site.id);
 
     const results = await Promise.allSettled([
-      recordVerification(report(site.publicId, challenge), ORIGIN),
-      recordVerification(report(site.publicId, challenge), ORIGIN),
-      recordVerification(report(site.publicId, challenge), ORIGIN),
+      recordVerification(report(site.publicId, challenge), site.origin),
+      recordVerification(report(site.publicId, challenge), site.origin),
+      recordVerification(report(site.publicId, challenge), site.origin),
     ]);
 
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -140,7 +157,7 @@ describeDb("verification and the public boundary", () => {
     const site = await newSite();
     const challenge = await issueChallenge(site.id, -1000);
 
-    await expect(recordVerification(report(site.publicId, challenge), ORIGIN)).rejects.toMatchObject(
+    await expect(recordVerification(report(site.publicId, challenge), site.origin)).rejects.toMatchObject(
       { code: "VERIFICATION_EXPIRED" },
     );
   });
@@ -149,7 +166,7 @@ describeDb("verification and the public boundary", () => {
     const site = await newSite();
 
     await expect(
-      recordVerification(report(site.publicId, generateToken()), ORIGIN),
+      recordVerification(report(site.publicId, generateToken()), site.origin),
     ).rejects.toMatchObject({ code: "VERIFICATION_EXPIRED" });
   });
 
@@ -177,7 +194,7 @@ describeDb("verification and the public boundary", () => {
     const challenge = await issueChallenge(site.id);
 
     await expect(
-      recordVerification(report(other.publicId, challenge), ORIGIN),
+      recordVerification(report(other.publicId, challenge), site.origin),
     ).rejects.toMatchObject({ code: "VERIFICATION_SITE_MISMATCH" });
   });
 
@@ -200,7 +217,7 @@ describeDb("verification and the public boundary", () => {
 
 describeDb("public configuration boundary", () => {
   let prisma: typeof import("@/lib/prisma").prisma;
-  let getPublishedConfig: typeof import("@/lib/services/config-service").getPublishedConfig;
+  let getConfigVersion: typeof import("@/lib/services/config-service").getConfigVersion;
   let serializeRuntimeConfig: typeof import("@/lib/services/config-service").serializeRuntimeConfig;
   let generatePublicSiteId: typeof import("@/lib/ids").generatePublicSiteId;
   let generateToken: typeof import("@/lib/tokens").generateToken;
@@ -208,11 +225,13 @@ describeDb("public configuration boundary", () => {
   let asJson: typeof import("@/lib/json").asJson;
 
   const sessionIds: string[] = [];
-  const ORIGIN = "https://published.example";
+  const RUN = Math.random().toString(36).slice(2, 8);
+  let siteCounter = 0;
+  const nextOrigin = () => `https://published-${RUN}-${siteCounter++}.example`;
 
   beforeAll(async () => {
     ({ prisma } = await import("@/lib/prisma"));
-    ({ getPublishedConfig, serializeRuntimeConfig } = await import(
+    ({ getConfigVersion, serializeRuntimeConfig } = await import(
       "@/lib/services/config-service"
     ));
     ({ generatePublicSiteId } = await import("@/lib/ids"));
@@ -222,6 +241,9 @@ describeDb("public configuration boundary", () => {
 
   afterAll(async () => {
     if (sessionIds.length > 0) {
+      // Sites deliberately outlive their creating session now, so they must
+      // be removed explicitly or they collide on the unique origin.
+      await prisma.site.deleteMany({ where: { createdBySessionId: { in: sessionIds } } });
       await prisma.builderSession.deleteMany({ where: { id: { in: sessionIds } } });
     }
   });
@@ -235,19 +257,21 @@ describeDb("public configuration boundary", () => {
     });
     sessionIds.push(session.id);
 
+    const origin = nextOrigin();
+
     const site = await prisma.site.create({
       data: {
         publicId: generatePublicSiteId(),
         createdBySessionId: session.id,
-        canonicalUrl: `${ORIGIN}/`,
-        origin: ORIGIN,
+        canonicalUrl: `${origin}/`,
+        origin,
       },
     });
 
     const build = (version: number, capabilities: "few" | "many") =>
       serializeRuntimeConfig({
         publicId: site.publicId,
-        origin: ORIGIN,
+        origin: site.origin,
         configVersion: version,
         mapping: {
           version: 1,
@@ -285,7 +309,7 @@ describeDb("public configuration boundary", () => {
   it("serves only the published version, never a newer draft", async () => {
     const site = await siteWithVersions();
 
-    const published = await getPublishedConfig(site.publicId);
+    const published = await getConfigVersion(site.publicId, 1);
     expect(published).not.toBeNull();
     expect(published!.config.configVersion).toBe(1);
     // v2 exists in the database and must not be reachable from here.
@@ -301,12 +325,14 @@ describeDb("public configuration boundary", () => {
     });
     sessionIds.push(session.id);
 
+    const origin = nextOrigin();
+
     const site = await prisma.site.create({
       data: {
         publicId: generatePublicSiteId(),
         createdBySessionId: session.id,
-        canonicalUrl: `${ORIGIN}/x`,
-        origin: ORIGIN,
+        canonicalUrl: `${origin}/x`,
+        origin,
       },
     });
     await prisma.configVersion.create({
@@ -318,16 +344,16 @@ describeDb("public configuration boundary", () => {
     });
 
     // A draft alone must not make a site publicly readable.
-    expect(await getPublishedConfig(site.publicId)).toBeNull();
+    expect(await getConfigVersion(site.publicId, 1)).toBeNull();
   });
 
   it("returns null for an unknown public id", async () => {
-    expect(await getPublishedConfig("wmf_00000000000000000000000A")).toBeNull();
+    expect(await getConfigVersion("wmf_00000000000000000000000A", 1)).toBeNull();
   });
 
   it("exposes no private field in the public payload", async () => {
     const site = await siteWithVersions();
-    const published = await getPublishedConfig(site.publicId);
+    const published = await getConfigVersion(site.publicId, 1);
     const payload = published!.config as unknown as Record<string, unknown>;
 
     // Allow-list, not a deny-list: a new field has to be added here

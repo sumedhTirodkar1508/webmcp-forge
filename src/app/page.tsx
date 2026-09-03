@@ -1,7 +1,9 @@
 import { AgentStatus } from "@/components/builder/agent-status";
+import { AskAgentSection } from "@/components/builder/ask-agent-section";
 import { BuilderProvider } from "@/components/builder/builder-provider";
 import { CapabilitiesSection } from "@/components/builder/capabilities-section";
 import { DiscoverySection } from "@/components/builder/discovery-section";
+import { InsightsSection } from "@/components/builder/insights-section";
 import { InstallSection } from "@/components/builder/install-section";
 import { TargetSection } from "@/components/builder/target-section";
 import { VerifySection } from "@/components/builder/verify-section";
@@ -40,6 +42,8 @@ export default async function BuilderPage() {
           <CapabilitiesSection />
           <InstallSection />
           <VerifySection />
+          <AskAgentSection />
+          <InsightsSection />
         </div>
       </div>
     </BuilderProvider>

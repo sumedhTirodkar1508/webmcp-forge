@@ -47,14 +47,21 @@ export interface DiscoverySummary {
 }
 
 export interface InstallationState {
-  /** The public site id embedded in the snippet. */
+  /** The public site id embedded in the snippet. Permanent. */
   publicId: string;
+  /** Snippet pinning `latestGeneratedVersion`, ready to paste. */
   scriptTag: string;
   runtimeUrl: string;
   platform: PlatformId;
-  configVersion: number | null;
-  publishedAt: string | null;
-  /** A newer successful scan exists than the published configuration. */
+  /** The newest version generated in Forge. NOT necessarily what is live. */
+  latestGeneratedVersion: number;
+  generatedAt: string | null;
+  /**
+   * The version the live website actually pins, when a scan could read
+   * `data-wmf-config` from its HTML. Null when unknown or not installed.
+   */
+  installedVersion: number | null;
+  /** A newer successful scan exists than the latest generated configuration. */
   needsRegeneration?: boolean;
 }
 

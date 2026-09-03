@@ -19,6 +19,7 @@ import {
 } from "@/lib/scanner/routes";
 import type {
   ContactSignals,
+  ContactFormCandidate,
   Heading,
   NavLink,
   PageExtraction,
@@ -78,6 +79,7 @@ const MAX_LINKS = 200;
 const MAX_SECTIONS = 12;
 const SECTION_TEXT_MAX = 600;
 const MAX_CONTACT_ENTRIES = 10;
+const MAX_CONTACT_FORMS = 5;
 const MAX_GROUPS = 12;
 const MAX_GROUP_SAMPLE_LEN = 200;
 const MAX_FIELD_SAMPLE_LEN = 200;
@@ -425,7 +427,190 @@ function collectContact($: CheerioAPI, options: ExtractOptions): ContactSignals 
     emails: [...emails].slice(0, MAX_CONTACT_ENTRIES),
     phones: [...phones].slice(0, MAX_CONTACT_ENTRIES),
     socials: socials.slice(0, MAX_CONTACT_ENTRIES),
+    forms: collectContactForms($),
   };
+}
+
+/**
+ * Finds an already-installed WebMCP Forge snippet in the fetched HTML.
+ *
+ * Must be called BEFORE `removeNoise`, which strips every `<script>` — the
+ * snippet is a script tag.
+ *
+ * Deliberately keyed on the `data-wmf-site` attribute rather than on the
+ * script's `src` host: the runtime is served by Forge and installed on someone
+ * else's website, so in development that is `http://localhost:3000/runtime/v1.js`
+ * on an ngrok-hosted portfolio. Requiring the hosts to match would never
+ * detect a real installation.
+ *
+ * Cheerio parses the markup, so attribute order, quoting style, `defer`/`async`
+ * and multi-line tags are all handled by the parser rather than by us.
+ */
+function detectInstalledSnippet(
+  $: CheerioAPI,
+): { siteId: string; configVersion: number | null; runtimeSrc: string | null } | undefined {
+  const tag = $("script[data-wmf-site]").first();
+  if (tag.length === 0) return undefined;
+
+  const siteId = collapse(tag.attr("data-wmf-site") ?? "").slice(0, 64);
+  if (!siteId) return undefined;
+
+  const rawVersion = collapse(tag.attr("data-wmf-config") ?? "");
+  const configVersion =
+    /^\d{1,7}$/.test(rawVersion) && Number(rawVersion) >= 1 ? Number(rawVersion) : null;
+
+  const runtimeSrc = collapse(tag.attr("src") ?? "").slice(0, 500) || null;
+
+  return { siteId, configVersion, runtimeSrc };
+}
+
+function fieldRole($: CheerioAPI, el: CheerioElement): "name" | "email" | "subject" | "message" | undefined {
+  const type = ($(el).attr("type") ?? "").toLowerCase();
+  if (el.tagName.toLowerCase() === "textarea") return "message";
+  if (type === "email" || $(el).attr("autocomplete") === "email") return "email";
+  const hint = [$(el).attr("name"), $(el).attr("id"), $(el).attr("placeholder"), $(el).attr("aria-label")]
+    .filter(Boolean).join(" ").toLowerCase();
+  if (/message|inquiry|enquiry|comment/.test(hint)) return "message";
+  if (/subject|topic/.test(hint)) return "subject";
+  if (/name|full.?name/.test(hint)) return "name";
+  return undefined;
+}
+
+/**
+ * A selector that identifies ONE form control unambiguously.
+ *
+ * `stableSelfSelector` falls back to the bare tag name, which is fine for a
+ * container but wrong for form fields: two plain `<input>` elements both become
+ * `"input"`, so name and email resolved to the same element and the visitor's
+ * email landed in the name box.
+ *
+ * Preference order runs from most durable to most positional:
+ *   1. `#id`            — explicit and stable
+ *   2. `input[name=…]`  — what the form itself submits under
+ *   3. `input[type=…]`  — only for genuinely distinguishing types
+ *   4. `[autocomplete=…]`
+ *   5. `tag:nth-of-type(n)` — a last resort that is at least unique
+ */
+function controlSelector($: CheerioAPI, form: CheerioElement, el: CheerioElement): string {
+  const tag = el.tagName.toLowerCase();
+
+  const id = $(el).attr("id");
+  if (id) return `#${cssIdentEscape(id)}`;
+
+  const name = $(el).attr("name");
+  if (name) return `${tag}[name="${cssAttrEscape(name)}"]`;
+
+  const type = ($(el).attr("type") ?? "").toLowerCase();
+  if (tag === "input" && type && type !== "text") {
+    // `text` is too common to identify anything; `email`/`tel` are not.
+    const sameType = $(form).find(`input[type="${cssAttrEscape(type)}"]`);
+    if (sameType.length === 1) return `input[type="${cssAttrEscape(type)}"]`;
+  }
+
+  const autocomplete = $(el).attr("autocomplete");
+  if (autocomplete) {
+    const sameAuto = $(form).find(`[autocomplete="${cssAttrEscape(autocomplete)}"]`);
+    if (sameAuto.length === 1) return `[autocomplete="${cssAttrEscape(autocomplete)}"]`;
+  }
+
+  // Positional fallback: unremarkable markup still gets a unique handle.
+  const siblings = $(form).find(tag).toArray();
+  const index = siblings.indexOf(el);
+  return index >= 0 ? `${tag}:nth-of-type(${index + 1})` : tag;
+}
+
+/** Escapes a value for use inside an attribute selector's quotes. */
+function cssAttrEscape(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+/**
+ * Drops any field whose selector does not resolve to its own element.
+ *
+ * Even with careful selector construction — and especially if a mapping ever
+ * arrives from elsewhere — two roles pointing at one control would silently
+ * type the wrong value into the wrong box. Verifying against the real document
+ * is cheaper than trusting the construction.
+ */
+function withDistinctFields(
+  $: CheerioAPI,
+  form: CheerioElement,
+  candidates: Array<{ role: keyof ContactFormCandidate["fields"]; el: CheerioElement; selector: string }>,
+): { fields: ContactFormCandidate["fields"]; dropped: string[] } {
+  const fields: ContactFormCandidate["fields"] = {};
+  const dropped: string[] = [];
+  const claimed = new Set<CheerioElement>();
+
+  for (const candidate of candidates) {
+    const matches = $(form).find(candidate.selector).toArray();
+
+    // Must select exactly the element it was built for, and nothing else.
+    if (matches.length !== 1 || matches[0] !== candidate.el || claimed.has(candidate.el)) {
+      dropped.push(candidate.role);
+      continue;
+    }
+
+    claimed.add(candidate.el);
+    fields[candidate.role] = candidate.selector;
+  }
+
+  return { fields, dropped };
+}
+
+function collectContactForms($: CheerioAPI): ContactFormCandidate[] {
+  const forms: ContactFormCandidate[] = [];
+  $("form").each((_index, form) => {
+    if (forms.length >= MAX_CONTACT_FORMS) return;
+    const context = collapse([
+      $(form).attr("id"), $(form).attr("name"), $(form).attr("aria-label"),
+      $(form).attr("class"), $(form).text(),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    const negative = /search|newsletter|subscribe|sign.?up|login|password|checkout|payment/.test(context);
+    const captcha = /captcha|recaptcha|hcaptcha/.test(context) || $(form).find("[data-sitekey], iframe[src*='captcha']").length > 0;
+    const fileRequired = $(form).find("input[type='file'][required]").length > 0;
+    const submit = $(form).find("button[type='submit'], input[type='submit'], button:not([type])").first();
+    const candidates: Array<{
+      role: keyof ContactFormCandidate["fields"];
+      el: CheerioElement;
+      selector: string;
+    }> = [];
+    const seenRoles = new Set<string>();
+
+    $(form).find("input, textarea").each((_fieldIndex, input) => {
+      const role = fieldRole($, input);
+      if (!role || seenRoles.has(role)) return;
+      seenRoles.add(role);
+      candidates.push({ role, el: input, selector: controlSelector($, form, input) });
+    });
+
+    const { fields, dropped } = withDistinctFields($, form, candidates);
+
+    if (negative || !fields.message || submit.length === 0) return;
+    const reasons: string[] = [];
+    let support: ContactFormCandidate["support"] = "SUPPORTED";
+    if (captcha) { support = "UNSUPPORTED"; reasons.push("CAPTCHA detected"); }
+    if (fileRequired) { support = "UNSUPPORTED"; reasons.push("required file upload"); }
+    if (dropped.length > 0 && support === "SUPPORTED") {
+      // A field we could not address distinctly is left unmapped rather than
+      // risking the wrong value in the wrong box.
+      support = "UNCERTAIN";
+      reasons.push(`could not distinctly identify: ${dropped.join(", ")}`);
+    }
+    const mappedSelectors = new Set(Object.values(fields));
+    const requiredUnknown = $(form)
+      .find("[required]")
+      .toArray()
+      .filter((input) => !mappedSelectors.has(controlSelector($, form, input))).length;
+    if (requiredUnknown > 0 && support === "SUPPORTED") { support = "UNCERTAIN"; reasons.push("unmapped required fields"); }
+    forms.push({
+      formSelector: stableSelfSelector($, form),
+      submitSelector: stableSelfSelector($, submit.get(0) as CheerioElement),
+      fields,
+      support,
+      reasons,
+    });
+  });
+  return forms;
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +914,7 @@ function buildField(
   if (!part) return undefined;
 
   let coverageCount = 0;
+  let nestedItemCount = 0;
   const samples: string[] = [];
   for (const member of members) {
     const found = $(member).find(part).first();
@@ -737,6 +923,10 @@ function buildField(
     if (value.trim().length > 0) {
       coverageCount++;
       if (samples.length < 3) samples.push(truncate(value, MAX_FIELD_SAMPLE_LEN));
+    }
+    const tag = found.get(0)?.tagName?.toLowerCase();
+    if (spec.source === "text" && (tag === "ul" || tag === "ol")) {
+      nestedItemCount += found.children().toArray().filter((child) => Boolean(collapse(found._make(child).text()))).length;
     }
   }
   const coverage = members.length > 0 ? coverageCount / members.length : 0;
@@ -749,6 +939,7 @@ function buildField(
     coverage,
     samples,
     hints: spec.hints,
+    ...(nestedItemCount > 0 ? { nestedItemCount } : {}),
   };
 }
 
@@ -945,6 +1136,9 @@ export function extractPage(html: string, options: ExtractOptions): PageExtracti
   // tags we're about to remove).
   const platform = fingerprintPlatform(html, $, options.url);
   const jsonLd = collectJsonLd($);
+  // Must run here: `removeNoise` strips every <script>, and the Forge snippet
+  // IS a script tag. Reading it afterwards could only ever find nothing.
+  const installedSnippet = detectInstalledSnippet($);
 
   const titleRaw = $("title").first().text();
   const title = titleRaw ? collapse(titleRaw) : undefined;
@@ -998,6 +1192,7 @@ export function extractPage(html: string, options: ExtractOptions): PageExtracti
     openGraph,
     jsonLd,
     platform,
+    ...(installedSnippet ? { installedSnippet } : {}),
     headings,
     nav,
     links,

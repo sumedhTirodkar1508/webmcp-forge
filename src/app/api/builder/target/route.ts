@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { assertSameOrigin, jsonError, jsonOk, readJson } from "@/lib/http/respond";
-import { getBuilderState } from "@/lib/services/builder-service";
+import { buildStateForSite } from "@/lib/services/builder-service";
 import { setTargetUrl } from "@/lib/services/site-service";
 import { requireBuilderSession } from "@/lib/session";
 
@@ -17,8 +17,8 @@ export async function POST(request: Request): Promise<Response> {
     const body = await readJson(request, bodySchema);
     const session = await requireBuilderSession();
 
-    const { site } = await setTargetUrl(session, body.url, body.siteId);
-    return jsonOk(await getBuilderState(session, site.id));
+    const { site } = await setTargetUrl(session, body.url);
+    return jsonOk(await buildStateForSite(site));
   } catch (error) {
     return jsonError(error);
   }

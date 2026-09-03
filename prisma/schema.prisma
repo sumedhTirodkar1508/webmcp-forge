@@ -27,7 +27,8 @@ model BuilderSession {
   lastSeenAt DateTime  @default(now()) @map("last_seen_at")
   expiresAt  DateTime  @map("expires_at")
 
-  sites Site[]
+  sites        Site[]
+  siteAccess   SiteAccess[]
 
   @@index([expiresAt])
   @@map("builder_sessions")
@@ -67,8 +68,15 @@ model Site {
   /// is random rather than sequential so sites cannot be enumerated.
   publicId String @unique @map("public_id")
 
-  createdBySessionId String         @map("created_by_session_id") @db.Uuid
-  createdBySession   BuilderSession @relation(fields: [createdBySessionId], references: [id], onDelete: Cascade)
+  /// Which anonymous session first registered this origin. Attribution only —
+  /// authorization lives in `accessGrants`.
+  ///
+  /// Nullable, and SET NULL rather than CASCADE, because a site must outlive
+  /// the browser session that created it. A site's `public_id` is pasted into
+  /// a real website; cascading its deletion off an expiring session row would
+  /// silently kill a live installation.
+  createdBySessionId String?         @map("created_by_session_id") @db.Uuid
+  createdBySession   BuilderSession? @relation(fields: [createdBySessionId], references: [id], onDelete: SetNull)
 
   /// Reserved for the future Auth.js migration; always null in the MVP.
   ownerUserId String? @map("owner_user_id") @db.Uuid
@@ -79,9 +87,22 @@ model Site {
   title        String?
   status       SiteStatus @default(DRAFT)
 
-  /// The single configuration version served publicly, if any.
+  /// LEGACY — retained to avoid a destructive migration; carries no authority.
+  ///
+  /// This once decided which configuration the public endpoint served. The
+  /// ACTIVE configuration is now whichever version the website itself pins in
+  /// `data-wmf-config`, because generating a configuration in Forge must never
+  /// change what a live website executes.
   publishedConfigVersionId String?        @unique @map("published_config_version_id") @db.Uuid
   publishedConfigVersion   ConfigVersion? @relation("SitePublishedConfig", fields: [publishedConfigVersionId], references: [id], onDelete: SetNull)
+
+  /// Capability settings the builder is currently editing.
+  ///
+  /// Toggling a capability used to append a whole ConfigVersion, so ordinary
+  /// UI fiddling inflated the history and made "latest version" look
+  /// meaningful. Versions are now append-only snapshots created only by an
+  /// explicit generate action; the in-progress draft lives here.
+  draftSettings Json? @map("draft_settings")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -91,11 +112,66 @@ model Site {
   configVersions        ConfigVersion[]        @relation("SiteConfigVersions")
   verificationChallenge VerificationChallenge[]
   verificationRuns      VerificationRun[]
+  liveTestSessions      LiveTestSession[]
   aiUsageEvents         AiUsageEvent[]
 
+  /// Browser sessions authorized to manage this site.
+  accessGrants SiteAccess[]
+
+  /// NOTE ON IDENTITY
+  ///
+  /// A site's identity is its ORIGIN — `public_id` is embedded permanently in
+  /// someone's website, so it must not change when a cookie is cleared. The
+  /// unique index that enforces that lives in a migration which is deliberately
+  /// left unapplied while duplicate rows exist; see
+  /// `20260903020000_site_identity_per_origin_global`.
+  ///
+  /// The older `@@unique([createdBySessionId, origin])` is what caused the
+  /// duplicate: it made identity per-session, so a new anonymous session
+  /// minted a second public id for a website Forge already knew about.
+  /// Authorization now lives in `SiteAccess` instead, which is the thing that
+  /// actually should be per-session.
+  @@unique([origin])
   @@index([createdBySessionId])
-  @@index([origin])
   @@map("sites")
+}
+
+/// Which anonymous browser sessions may manage a site.
+///
+/// This is the piece that was previously conflated with identity. A website's
+/// public id must be stable for the life of the website; permission to change
+/// its configuration must not be. Separating them means clearing cookies costs
+/// you authorization (recoverable) rather than rotating the installation id
+/// embedded in the site (not recoverable without editing the site).
+///
+/// Access is never granted merely because someone typed a public URL — see
+/// `resolveSiteForTarget` in `site-service.ts`.
+model SiteAccess {
+  id String @id @default(uuid()) @db.Uuid
+
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  builderSessionId String         @map("builder_session_id") @db.Uuid
+  builderSession   BuilderSession @relation(fields: [builderSessionId], references: [id], onDelete: Cascade)
+
+  /// How this session came to be authorized. `CREATED` is the session that
+  /// first registered the origin; `DEV_REATTACH` is the local-development
+  /// escape hatch and is impossible in production.
+  grantedVia SiteAccessGrant @default(CREATED) @map("granted_via")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([siteId, builderSessionId])
+  @@index([builderSessionId])
+  @@map("site_access")
+}
+
+enum SiteAccessGrant {
+  CREATED
+  DEV_REATTACH
+
+  @@map("site_access_grant")
 }
 
 enum PageType {
@@ -280,6 +356,12 @@ model VerificationRun {
   /// Structured, user-presentable diagnostics. No stack traces.
   diagnostics Json?
 
+  /// What the browser's tool registry looked like at verification time:
+  /// `{ existingTools, conflictingTools, forgeRegistered, failures }`.
+  /// Stored separately from `diagnostics` because the readiness assistant and
+  /// the insights panel need the raw counts, not rendered prose.
+  toolRegistry Json? @map("tool_registry")
+
   outcome VerificationOutcome @default(FAILED)
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -339,4 +421,96 @@ model AiUsageEvent {
   @@index([siteId, purpose, createdAt])
   @@index([scanRunId])
   @@map("ai_usage_events")
+}
+
+// ---------------------------------------------------------------------------
+// Live agent test relay
+// ---------------------------------------------------------------------------
+
+enum LiveTestStatus {
+  PENDING
+  READY
+  CLOSED
+  EXPIRED
+
+  @@map("live_test_status")
+}
+
+/// A short-lived, origin-bound channel for executing real WebMCP tools on the
+/// owner's own portfolio.
+///
+/// Forge cannot reach another origin's `document.modelContext`, so a genuine
+/// tool call has to happen inside the target page. This session is the relay
+/// that makes that possible without a browser extension — and it exists only
+/// while the owner has explicitly started a test. The ordinary installed
+/// runtime never polls Forge.
+///
+/// As with verification challenges, only the token hash is stored.
+model LiveTestSession {
+  id     String @id @default(uuid()) @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  tokenHash      String   @unique @map("token_hash")
+  expectedOrigin String   @map("expected_origin")
+  status         LiveTestStatus @default(PENDING)
+
+  expiresAt DateTime  @map("expires_at")
+  readyAt   DateTime? @map("ready_at")
+  closedAt  DateTime? @map("closed_at")
+
+  runtimeVersion String? @map("runtime_version")
+
+  /// Tool names the target reported as actually visible to the browser, so
+  /// routing can only choose something that genuinely exists there.
+  availableTools Json? @map("available_tools")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  commands LiveTestCommand[]
+
+  @@index([siteId, createdAt])
+  @@index([expiresAt])
+  @@map("live_test_sessions")
+}
+
+enum LiveTestCommandStatus {
+  PENDING
+  DISPATCHED
+  COMPLETED
+  FAILED
+
+  @@map("live_test_command_status")
+}
+
+/// One tool invocation queued for the target page.
+///
+/// The status column is the at-most-once guarantee: PENDING -> DISPATCHED and
+/// DISPATCHED -> COMPLETED are both conditional updates, so repeated polling
+/// cannot hand the same command out twice and a repeated result POST cannot
+/// complete it twice.
+model LiveTestCommand {
+  id        String          @id @default(uuid()) @db.Uuid
+  sessionId String          @map("session_id") @db.Uuid
+  session   LiveTestSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  /// Always a read-only capability id from the allow-list.
+  tool      String
+  arguments Json
+
+  status LiveTestCommandStatus @default(PENDING)
+
+  dispatchedAt DateTime? @map("dispatched_at")
+  completedAt  DateTime? @map("completed_at")
+
+  /// Bounded text returned by the real browser tool. Truncated before storage.
+  result String?
+
+  /// Coarse classification only; never a stack trace.
+  errorCode String? @map("error_code")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([sessionId, status, createdAt])
+  @@map("live_test_commands")
 }

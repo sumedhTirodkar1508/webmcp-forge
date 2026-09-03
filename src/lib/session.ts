@@ -119,13 +119,24 @@ export async function requireOwnedSite(siteId: string): Promise<Site> {
   return requireOwnedSiteFor(session, siteId);
 }
 
+/**
+ * Loads a site by id.
+ *
+ * Named `requireOwnedSiteFor` for call-site compatibility, but this MVP has no
+ * ownership model: a site is identified by its origin and anyone may scan a
+ * public website. What protects a live site is that generating a configuration
+ * cannot activate it — the website pins the version it runs in
+ * `data-wmf-config`, so deployment access is the real boundary.
+ *
+ * The session parameter is retained because sessions still carry rate limiting
+ * and the AI question ledger.
+ */
 export async function requireOwnedSiteFor(
-  session: BuilderSession,
+  _session: BuilderSession,
   siteId: string,
 ): Promise<Site> {
   const site = await prisma.site.findUnique({ where: { id: siteId } });
-
-  if (!site || site.createdBySessionId !== session.id) {
+  if (!site) {
     throw new AppError("NOT_FOUND", "That site could not be found.");
   }
   return site;

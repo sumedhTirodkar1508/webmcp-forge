@@ -27,6 +27,8 @@ export interface ExtractedItem {
   index: number;
   id?: string;
   fields: Record<string, string>;
+  /** Leaf values read from actual mapped UL/OL elements; never string-split. */
+  listFields?: Record<string, string[]>;
 }
 
 /** Collapses whitespace and truncates. Never returns undefined for "". */
@@ -110,6 +112,17 @@ export function readField(
   }
 }
 
+function readListField(item: Element, mapping: FieldMapping): string[] | undefined {
+  if (mapping.source !== "text") return undefined;
+  const target = mapping.selector === "" ? item : safeQuery(item, mapping.selector);
+  if (!target?.matches("ul, ol")) return undefined;
+  const values = Array.from(target.children)
+    .map((child) => cleanText(child.textContent))
+    .filter(Boolean)
+    .slice(0, MAX_ITEMS);
+  return values.length > 0 ? values : undefined;
+}
+
 /**
  * Does a stored route pattern apply to the current path?
  *
@@ -160,9 +173,12 @@ export function extractList(
   const items: ExtractedItem[] = [];
   for (const [index, element] of elements.slice(0, MAX_ITEMS).entries()) {
     const fields: Record<string, string> = {};
+    const listFields: Record<string, string[]> = {};
     for (const [role, fieldMapping] of Object.entries(mapping.fields)) {
       const value = readField(element, fieldMapping, baseUrl);
       if (value) fields[role] = value;
+      const list = readListField(element, fieldMapping);
+      if (list) listFields[role] = list;
     }
     // Skip items that yielded nothing at all — usually spacer or skeleton nodes.
     if (Object.keys(fields).length === 0) continue;
@@ -171,6 +187,7 @@ export function extractList(
       index,
       id: element.id || element.getAttribute("data-id") || undefined,
       fields,
+      ...(Object.keys(listFields).length ? { listFields } : {}),
     });
   }
 

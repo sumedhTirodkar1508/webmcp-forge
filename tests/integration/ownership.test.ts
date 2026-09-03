@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { hasDatabase } from "../setup/env";
+import { hasTestDatabase, pointPrismaAtTestDatabase } from "../setup/env";
 
 /**
  * Ownership and public/private boundary tests.
@@ -15,7 +15,10 @@ import { hasDatabase } from "../setup/env";
  * works in a checkout without secrets.
  */
 
-const describeDb = hasDatabase() ? describe : describe.skip;
+// These suites mutate rows, so they run ONLY against an ephemeral
+// TEST_DATABASE_URL — never against the application's own DATABASE_URL.
+const describeDb = hasTestDatabase() ? describe : describe.skip;
+if (hasTestDatabase()) pointPrismaAtTestDatabase();
 
 describeDb("anonymous ownership", () => {
   // Imported lazily so the module (and its env parsing) is only touched when
@@ -38,6 +41,11 @@ describeDb("anonymous ownership", () => {
   afterAll(async () => {
     if (createdSessionIds.length > 0) {
       // Sites, configs and challenges all cascade from the session.
+      // Sites deliberately outlive their creating session now, so they must
+      // be removed explicitly or they collide on the unique origin.
+      await prisma.site.deleteMany({
+        where: { createdBySessionId: { in: createdSessionIds } },
+      });
       await prisma.builderSession.deleteMany({
         where: { id: { in: createdSessionIds } },
       });
@@ -55,15 +63,20 @@ describeDb("anonymous ownership", () => {
     return session;
   };
 
-  const newSite = async (sessionId: string) =>
-    prisma.site.create({
+  // Origin is globally unique, so every fixture site needs its own.
+  const RUN = Math.random().toString(36).slice(2, 8);
+  let siteCounter = 0;
+  const newSite = async (sessionId: string) => {
+    const origin = `https://ownership-${RUN}-${siteCounter++}.example`;
+    return prisma.site.create({
       data: {
         publicId: generatePublicSiteId(),
         createdBySessionId: sessionId,
-        canonicalUrl: "https://example.com",
-        origin: "https://example.com",
+        canonicalUrl: `${origin}/`,
+        origin,
       },
     });
+  };
 
   it("stores only a hash of the session token, never the token", async () => {
     const token = generateToken();
@@ -79,7 +92,27 @@ describeDb("anonymous ownership", () => {
     expect(stored?.tokenHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("lets the owning session load its own site", async () => {
+  it("lets ANY session load a site, because this MVP has no ownership model", async () => {
+    // Deliberate: a website is identified by its origin, and anyone may scan a
+    // public site. What protects a live site is that generating a
+    // configuration cannot activate it — the site pins the version it runs.
+    const owner = await newSession();
+    const stranger = await newSession();
+    const site = await newSite(owner.id);
+
+    await expect(requireOwnedSiteFor(stranger, site.id)).resolves.toMatchObject({
+      id: site.id,
+    });
+  });
+
+  it("still reports an unknown site id as not found", async () => {
+    const session = await newSession();
+    await expect(
+      requireOwnedSiteFor(session, "00000000-0000-4000-8000-000000000000"),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("loads a site for the session that created it", async () => {
     const session = await newSession();
     const site = await newSite(session.id);
 
@@ -87,33 +120,7 @@ describeDb("anonymous ownership", () => {
     expect(loaded.id).toBe(site.id);
   });
 
-  it("refuses a site belonging to a different session", async () => {
-    const owner = await newSession();
-    const stranger = await newSession();
-    const site = await newSite(owner.id);
 
-    await expect(requireOwnedSiteFor(stranger, site.id)).rejects.toMatchObject({
-      code: "NOT_FOUND",
-    });
-  });
-
-  it("reports a missing site the same way as a forbidden one", async () => {
-    const stranger = await newSession();
-    const owner = await newSession();
-    const site = await newSite(owner.id);
-
-    const forbidden = await requireOwnedSiteFor(stranger, site.id).catch((e: unknown) => e);
-    const missing = await requireOwnedSiteFor(
-      stranger,
-      "00000000-0000-4000-8000-000000000000",
-    ).catch((e: unknown) => e);
-
-    // Identical responses, so a stranger cannot probe which site ids exist.
-    expect((forbidden as { code: string }).code).toBe((missing as { code: string }).code);
-    expect((forbidden as { message: string }).message).toBe(
-      (missing as { message: string }).message,
-    );
-  });
 
   it("generates public site ids that are random, not sequential", async () => {
     const ids = new Set(Array.from({ length: 200 }, () => generatePublicSiteId()));

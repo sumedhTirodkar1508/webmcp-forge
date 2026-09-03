@@ -12,6 +12,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useBuilder } from "@/components/builder/builder-provider";
+import { RepairPanel } from "@/components/builder/repair-panel";
 import { StepShell } from "@/components/builder/step-shell";
 import type { VerificationDiagnostic } from "@/lib/services/types";
 
@@ -48,14 +49,18 @@ export function VerifySection() {
   const cancelledRef = useRef(false);
 
   async function handleCheck() {
-    if (!state.siteId) return;
+    // Pin the site for the whole check. A verification belongs to one site and
+    // one origin; if the target changes mid-check, this loop must stop rather
+    // than keep refreshing (and re-rendering) whatever is now selected.
+    const siteId = state.siteId;
+    if (!siteId) return;
     setTimedOut(false);
     setStarting(true);
     const previousCheckedAt = verification?.checkedAt ?? null;
 
     let verifyUrl: string;
     try {
-      const result = await actions.startVerification();
+      const result = await actions.startVerification(siteId);
       verifyUrl = result.verifyUrl;
     } catch {
       setStarting(false);
@@ -73,8 +78,15 @@ export function VerifySection() {
       await sleep(POLL_INTERVAL_MS);
       if (cancelledRef.current) return;
 
+      // The user switched targets while this check was running. Abandon it —
+      // site A's result must never be applied to site B's panel.
+      if (actions.getState().siteId !== siteId) {
+        setPolling(false);
+        return;
+      }
+
       try {
-        const next = await actions.refreshState();
+        const next = await actions.refreshState(siteId);
         const nextVerification = next.verification;
         if (nextVerification?.checkedAt && nextVerification.checkedAt !== previousCheckedAt) {
           setPolling(false);
@@ -192,6 +204,7 @@ export function VerifySection() {
           </div>
         )}
       </div>
+      <RepairPanel />
     </StepShell>
   );
 }

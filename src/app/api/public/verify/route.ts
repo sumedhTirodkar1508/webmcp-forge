@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { toAppError } from "@/lib/errors";
+import { logger } from "@/lib/logger";
 import { corsFor } from "@/lib/http/cors";
 import { isValidPublicSiteId } from "@/lib/ids";
 import { prisma } from "@/lib/prisma";
@@ -29,6 +30,8 @@ const reportSchema = z.object({
   challenge: z.string().max(256).refine(isPlausibleToken, "invalid challenge"),
   runtimeVersion: z.string().max(32),
   configVersion: z.number().int().min(0).max(1_000_000),
+  // What the snippet pinned; null when the attribute is missing.
+  pinnedVersion: z.number().int().min(1).max(1_000_000).nullable().default(null),
   path: z.string().max(500),
   webmcpAvailable: z.boolean(),
   webmcpReason: z.string().max(64).nullable().default(null),
@@ -95,11 +98,32 @@ export async function POST(request: Request): Promise<Response> {
   const cors = corsFor(requestOrigin, expectedOrigin ?? "", METHODS);
 
   if (!expectedOrigin || !cors.allowed) {
+    /*
+     * This rejection used to be completely silent: the runtime swallowed the
+     * 403 and the builder simply timed out with "your site hasn't reported
+     * back yet", which points at popup blocking rather than at the real cause.
+     * Log the category — never the token — so the failure is diagnosable.
+     */
+    logger.warn(
+      expectedOrigin
+        ? "verification.origin_mismatch"
+        : "verification.challenge_site_mismatch",
+      {
+        siteId: parsed.siteId,
+        expectedOrigin,
+        // The browser-asserted Origin. Not a secret, and the whole point of
+        // the check.
+        reportedOrigin: requestOrigin,
+      },
+    );
+
     return Response.json(
       {
         error: {
           code: "VERIFICATION_ORIGIN_MISMATCH",
-          message: "That report did not come from the website we expected.",
+          message: expectedOrigin
+            ? `That report came from ${requestOrigin ?? "an unknown origin"}, but this site is configured for ${expectedOrigin}.`
+            : "That report did not come from the website we expected.",
         },
       },
       { status: 403, headers: cors.headers },
@@ -114,6 +138,10 @@ export async function POST(request: Request): Promise<Response> {
     );
   } catch (error) {
     const appError = toAppError(error);
+    logger.warn(`verification.${appError.code.toLowerCase()}`, {
+      siteId: parsed.siteId,
+      reportedOrigin: requestOrigin,
+    });
     return Response.json(appError.toJSON(), {
       status: appError.status,
       headers: { ...cors.headers, "cache-control": "no-store" },

@@ -46,6 +46,8 @@ export const CAPABILITY_IDS = [
   "get_contact_info",
   "navigate_site",
   "focus_project",
+  "prepare_contact_message",
+  "send_contact_message",
 ] as const;
 
 export type CapabilityId = (typeof CAPABILITY_IDS)[number];
@@ -62,7 +64,8 @@ export type DataRequirement =
   | "experience"
   | "education"
   | "contact"
-  | "navigation";
+  | "navigation"
+  | "contact_form";
 
 export interface CapabilityDefinition {
   id: CapabilityId;
@@ -305,6 +308,66 @@ export const CAPABILITY_CATALOGUE: Record<CapabilityId, CapabilityDefinition> = 
     requires: ["projects"],
     defaultEnabled: true,
     order: 10,
+  },
+
+  prepare_contact_message: {
+    id: "prepare_contact_message",
+    label: "Draft a message to me",
+    description:
+      "Lets an agent draft a message using your existing contact form, and show it to the visitor for review. Nothing is sent at this stage.",
+    agentDescription:
+      "Validates a contact message against the live contact form on this page and returns a preview plus a confirmationId. This SENDS NOTHING and contacts no server — it only prepares a draft held in the page's memory. Call send_contact_message with the confirmationId to actually submit, which additionally requires the person at the browser to approve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The sender's name.", maxLength: 120 },
+        email: { type: "string", description: "The sender's email address.", maxLength: 200 },
+        subject: { type: "string", description: "A short subject line.", maxLength: 200 },
+        message: {
+          type: "string",
+          description: "The message body.",
+          minLength: 1,
+          maxLength: 5000,
+        },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    },
+    // Nothing is submitted, but a draft is retained in page memory, so this is
+    // not a pure read.
+    annotations: { readOnlyHint: false, untrustedContentHint: true },
+    requires: ["contact_form"],
+    // Consequential capability: off unless the owner deliberately turns it on.
+    defaultEnabled: false,
+    order: 9,
+  },
+  send_contact_message: {
+    id: "send_contact_message",
+    label: "Send a message through my contact form",
+    description:
+      "Lets an agent submit a message you drafted through your existing contact form. The visitor must confirm in their browser before anything is submitted.",
+    agentDescription:
+      "Submits a message previously staged by prepare_contact_message. Requires that confirmationId and confirmed:true, and additionally requires the person at the browser to approve a confirmation prompt. A confirmationId may be used at most once and expires. This does not send email directly — it submits the site's own existing form.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        confirmationId: {
+          type: "string",
+          description: "The confirmationId returned by prepare_contact_message.",
+          maxLength: 100,
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Must be true to proceed.",
+        },
+      },
+      required: ["confirmationId", "confirmed"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: true },
+    requires: ["contact_form"],
+    defaultEnabled: false,
+    order: 8,
   },
 };
 

@@ -14,6 +14,12 @@ import { semanticResultSchema, type SemanticResult } from "@/lib/ai/semantic-sch
 import { getEnv, hasGeminiKey } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import type { ScanRepresentation } from "@/lib/scanner/types";
+import { assessAmbiguity } from "@/lib/scanner/visual/ambiguity";
+import {
+  captureForAmbiguity,
+  visualScanAvailable,
+  type CapturedImage,
+} from "@/lib/scanner/visual/page-renderer";
 
 /**
  * Semantic interpretation of a deterministic scan.
@@ -86,6 +92,24 @@ export async function interpretScan(
   const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const promptInput = buildPromptInput(representation);
 
+  /*
+   * Visual assistance is strictly opt-in and strictly conditional. A confident
+   * scan renders nothing at all, and the normal path still makes exactly ONE
+   * semantic request — the screenshots, when there are any, are attached to
+   * that same call rather than adding another.
+   */
+  let images: CapturedImage[] = [];
+  const visualWarnings: string[] = [];
+
+  if (visualScanAvailable()) {
+    const assessment = assessAmbiguity(representation);
+    if (assessment.ambiguous) {
+      const captured = await captureForAmbiguity(assessment.sections);
+      images = captured.images;
+      visualWarnings.push(...captured.warnings);
+    }
+  }
+
   const result = await runModelChain<SemanticResult>({
     models: modelChain(),
     timeoutMs: env.GEMINI_REQUEST_TIMEOUT_MS,
@@ -101,7 +125,17 @@ export async function interpretScan(
         contents: [
           {
             role: "user",
-            parts: [{ text: JSON.stringify(promptInput) }],
+            parts: [
+              { text: JSON.stringify(promptInput) },
+              // Screenshots, when present, only ever accompany the compact
+              // deterministic JSON. Raw page HTML is never sent.
+              ...images.map((image) => ({
+                inlineData: {
+                  mimeType: image.mimeType,
+                  data: Buffer.from(image.data).toString("base64"),
+                },
+              })),
+            ],
           },
         ],
         config: {
@@ -138,6 +172,7 @@ export async function interpretScan(
       ...heuristic,
       warnings: [
         "AI interpretation was unavailable, so the structure was detected automatically and may be less accurate.",
+        ...visualWarnings,
         ...heuristic.warnings,
       ],
       model: null,
@@ -154,9 +189,10 @@ export async function interpretScan(
     warnings: result.fellBack
       ? [
           "The main AI model was unavailable, so a backup model interpreted your site.",
+          ...visualWarnings,
           ...resolved.warnings,
         ]
-      : resolved.warnings,
+      : [...visualWarnings, ...resolved.warnings],
     model: result.model,
     usedAi: true,
     fellBack: result.fellBack,

@@ -52,11 +52,13 @@ const READY_STATE: BuilderState = {
   ],
   installation: {
     publicId: "wmf_0123456789ABCDEFGHJKMNPQ",
-    scriptTag: '<script data-wmf-site="wmf_0123456789ABCDEFGHJKMNPQ"></script>',
+    scriptTag:
+      '<script data-wmf-site="wmf_0123456789ABCDEFGHJKMNPQ" data-wmf-config="1"></script>',
     runtimeUrl: "https://forge.example/runtime/v1.js",
     platform: "CUSTOM",
-    configVersion: 1,
-    publishedAt: "2026-09-02T00:00:00.000Z",
+    latestGeneratedVersion: 1,
+    generatedAt: "2026-09-02T00:00:00.000Z",
+    installedVersion: null,
   },
 };
 

@@ -26,6 +26,31 @@ import { getVerificationState } from "@/lib/services/verification-service";
  * over the database.
  */
 
+/**
+ * The config version the live website pins, if the scan could read it.
+ *
+ * This is the only thing that says what a site is ACTUALLY running; the newest
+ * generated version says nothing about deployment.
+ */
+function detectedInstalledVersion(
+  scan: Awaited<ReturnType<typeof getLatestScan>>,
+  publicId: string,
+): number | null {
+  const deterministic = (scan?.deterministic ?? {}) as Record<string, unknown>;
+  const installed = deterministic.installedSnippet as
+    | { siteId?: unknown; configVersion?: unknown }
+    | null
+    | undefined;
+  if (!installed) return null;
+
+  // A snippet for a DIFFERENT Forge site is not this site's installation, even
+  // though it is genuinely on the page.
+  if (installed.siteId !== publicId) return null;
+
+  const value = installed.configVersion;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+}
+
 const SECTION_LABELS: Record<string, string> = {
   profile: "About you",
   projects: "Projects",
@@ -57,9 +82,14 @@ function summariseDiscovery(
 
   const found: Record<string, number> = {};
   for (const key of ["projects", "skills", "experience", "education"] as const) {
-    const section = mapping[key] as { expectedCount?: number } | undefined;
+    const section = mapping[key] as { expectedCount?: number; expectedNestedCount?: number } | undefined;
     if (section?.expectedCount !== undefined) {
-      found[SECTION_LABELS[key] ?? key] = section.expectedCount;
+      if (key === "skills" && section.expectedNestedCount !== undefined) {
+        found.Skills = section.expectedNestedCount;
+        found["Skill groups"] = section.expectedCount;
+      } else {
+        found[SECTION_LABELS[key] ?? key] = section.expectedCount;
+      }
     }
   }
   if (mapping.navigation) {
@@ -106,12 +136,11 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
     demoQuestionsRemaining(site.id),
   ]);
 
-  const publishedVersion = site.publishedConfigVersionId
-    ? await prisma.configVersion.findUnique({
-        where: { id: site.publishedConfigVersionId },
-        select: { version: true, publishedAt: true },
-      })
-    : null;
+  const latestVersion = await prisma.configVersion.findFirst({
+    where: { siteId: site.id },
+    orderBy: { version: "desc" },
+    select: { version: true, publishedAt: true, createdAt: true },
+  });
 
   const origin = appOrigin();
 
@@ -124,19 +153,21 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
     status: site.status,
     discovery: summariseDiscovery(scan),
     capabilities: current ? describeCapabilities(current.mapping, current.settings) : [],
-    installation: publishedVersion
+    installation: latestVersion
       ? {
           publicId: site.publicId,
-          scriptTag: buildScriptTag(origin, site.publicId),
+          // The snippet always pins the version the user is being asked to
+          // deploy — never "latest", which the runtime must not resolve.
+          scriptTag: buildScriptTag(origin, site.publicId, latestVersion.version),
           runtimeUrl: `${origin}${RUNTIME_PATH}`,
           platform: site.platform,
-          configVersion: publishedVersion.version,
-          publishedAt: publishedVersion.publishedAt?.toISOString() ?? null,
+          latestGeneratedVersion: latestVersion.version,
+          generatedAt: (latestVersion.publishedAt ?? latestVersion.createdAt).toISOString(),
+          installedVersion: detectedInstalledVersion(scan, site.publicId),
           needsRegeneration: Boolean(
             scan?.finishedAt &&
               (scan.status === "SUCCEEDED" || scan.status === "PARTIAL") &&
-              publishedVersion.publishedAt &&
-              scan.finishedAt > publishedVersion.publishedAt,
+              scan.finishedAt > (latestVersion.publishedAt ?? latestVersion.createdAt),
           ),
         }
       : null,
@@ -152,7 +183,8 @@ export async function getBuilderState(
 ): Promise<BuilderState> {
   const site = siteId
     ? await prisma.site.findFirst({
-        where: { id: siteId, createdBySessionId: session.id },
+        // Identity is the origin; anyone may load a site by id.
+        where: { id: siteId },
       })
     : await prisma.site.findFirst({
         where: { createdBySessionId: session.id },

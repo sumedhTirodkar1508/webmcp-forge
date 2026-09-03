@@ -360,3 +360,46 @@ describe("adversarial input — script content and javascript: links never leak"
     expect(serialized).not.toContain("alert(1)");
   });
 });
+
+describe("contact-form extraction", () => {
+  const extract = (body: string) =>
+    extractPage(`<html><body>${body}</body></html>`, {
+      url: "https://example.test/contact",
+      origin: "https://example.test",
+      httpStatus: 200,
+      contentType: "text/html",
+      byteSize: body.length,
+    });
+
+  it("finds a structurally usable message form and rejects newsletter/search forms", () => {
+    const page = extract(`
+      <form id="contact-form" aria-label="Contact"><input name="name"><input type="email" name="email"><textarea name="message"></textarea><button type="submit">Send message</button></form>
+      <form id="newsletter"><input type="email" name="email"><button type="submit">Subscribe</button></form>
+      <form id="search"><input name="q"><button type="submit">Search</button></form>`);
+    expect(page.contact.forms).toHaveLength(1);
+    expect(page.contact.forms?.[0]).toMatchObject({ support: "SUPPORTED" });
+    expect(page.contact.forms?.[0].fields).toMatchObject({ name: expect.any(String), email: expect.any(String), message: expect.any(String) });
+  });
+
+  it("marks CAPTCHA and a required upload as unsupported", () => {
+    const page = extract(`<form id="contact"><textarea name="message"></textarea><input type="file" required><div class="g-recaptcha" data-sitekey="demo"></div><button type="submit">Send</button></form>`);
+    expect(page.contact.forms?.[0]).toMatchObject({ support: "UNSUPPORTED" });
+  });
+});
+
+describe("grouped skill metadata", () => {
+  it("preserves six groups while deterministically counting 43 nested skill values", () => {
+    const html = readFileSync(join(FIXTURES_DIR, "grouped-skills.html"), "utf8");
+    const page = extractPage(html, {
+      url: "https://skills.example/",
+      origin: "https://skills.example",
+      httpStatus: 200,
+      contentType: "text/html",
+      byteSize: Buffer.byteLength(html),
+    });
+    const groups = page.repeatedGroups.find(
+      (group) => group.context?.sectionId === "skills" && group.count === 6,
+    );
+    expect(groups?.fields.nestedList?.nestedItemCount).toBe(43);
+  });
+});

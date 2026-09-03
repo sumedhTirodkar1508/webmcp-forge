@@ -6,6 +6,7 @@ import {
 } from "@/lib/capabilities/catalogue";
 import type { RuntimeConfig } from "@/lib/runtime-config";
 import type { WebMcpTool, WebMcpTextResult } from "@/lib/webmcp/types";
+import { claimDraft, fillAndSubmit, findContactForm, stageDraft } from "@/runtime/contact-form";
 import {
   extractList,
   extractSingle,
@@ -37,6 +38,21 @@ export interface ToolContext {
   /** Current absolute URL; re-read on every invocation so SPA navigation is
    *  reflected without re-registering tools. */
   currentUrl: () => string;
+  /**
+   * Asks the person at the browser to approve a consequential action.
+   *
+   * Injectable so the approve/decline paths are testable. Defaults to the
+   * browser's native `confirm`, which an agent cannot answer on the visitor's
+   * behalf — that is the point of it.
+   */
+  confirm?: (message: string) => boolean;
+}
+
+/** The confirmation prompt, falling back to the browser's own. */
+function askForApproval(ctx: ToolContext, message: string): boolean {
+  if (ctx.confirm) return ctx.confirm(message);
+  if (typeof window === "undefined" || typeof window.confirm !== "function") return false;
+  return window.confirm(message);
 }
 
 function textResult(text: string, structured?: unknown): WebMcpTextResult {
@@ -217,17 +233,34 @@ function buildHandler(id: CapabilityId, ctx: ToolContext): Handler {
       };
 
     case "get_skills":
+      return async () => {
+        const { items, applies } = readList(ctx, mapping.skills);
+        if (!applies || items.length === 0) return notAvailable("skills");
+        const grouped = items.some((item) => item.listFields?.items?.length);
+        if (!grouped) {
+          const skills = items.map((item) => item.fields.title ?? item.fields.name).filter(Boolean);
+          return textResult(skills.join("\n"), { totalSkills: skills.length, skills });
+        }
+        const groups = items.map((item) => ({
+          category: item.fields.category ?? item.fields.name ?? item.fields.title ?? "Skills",
+          skills: item.listFields?.items ?? [],
+        }));
+        const totalSkills = groups.reduce((total, group) => total + group.skills.length, 0);
+        return textResult(
+          groups.map((group) => `${group.category}:\n${group.skills.join(", ")}`).join("\n\n"),
+          { totalSkills, totalGroups: groups.length, groups },
+        );
+      };
+
     case "get_experience":
     case "get_education":
       return async () => {
         const listMapping =
-          id === "get_skills"
-            ? mapping.skills
-            : id === "get_experience"
+          id === "get_experience"
               ? mapping.experience
               : mapping.education;
         const label =
-          id === "get_skills" ? "skills" : id === "get_experience" ? "experience" : "education";
+          id === "get_experience" ? "experience" : "education";
 
         const { items, applies } = readList(ctx, listMapping);
         if (!applies) return notAvailable(label);
@@ -357,6 +390,132 @@ function buildHandler(id: CapabilityId, ctx: ToolContext): Handler {
         });
       };
 
+    case "prepare_contact_message":
+      return async (input) => {
+        const form = mapping.contactForm;
+        if (!form) return notAvailable("a contact form");
+        if (!routeMatches(form.route, new URL(ctx.currentUrl()).pathname)) {
+          return notAvailable("a contact form on this page");
+        }
+        if (form.support === "UNSUPPORTED") {
+          return textResult(
+            `This site's contact form cannot be filled in automatically (${form.reasons.join("; ")}).`,
+            { prepared: false, reasons: form.reasons },
+          );
+        }
+        // Confirm the mapped form is still really on the page before promising
+        // anything — a redesign may have removed it since the scan.
+        if (!findContactForm(ctx.doc, form)) {
+          return textResult("The contact form is no longer on this page.", { prepared: false });
+        }
+
+        const message = asString(input.message, 5000);
+        if (!message) {
+          return textResult("Provide the message body.", { prepared: false });
+        }
+        const draft = {
+          message,
+          name: asString(input.name, 120),
+          email: asString(input.email, 200),
+          subject: asString(input.subject, 200),
+        };
+        if (draft.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.email)) {
+          return textResult("That email address does not look valid.", { prepared: false });
+        }
+
+        const { confirmationId, expiresAt } = stageDraft(draft);
+
+        return textResult(
+          [
+            "Nothing has been sent.",
+            "",
+            "This message is staged for review only:",
+            draft.name ? `From: ${draft.name}` : null,
+            draft.email ? `Email: ${draft.email}` : null,
+            draft.subject ? `Subject: ${draft.subject}` : null,
+            `Message: ${draft.message}`,
+            "",
+            "To submit it, call send_contact_message with this confirmationId. The person at the browser will still be asked to approve.",
+          ]
+            .filter((line) => line !== null)
+            .join("\n"),
+          {
+            prepared: true,
+            sent: false,
+            confirmationId,
+            expiresAt: new Date(expiresAt).toISOString(),
+            preview: draft,
+          },
+        );
+      };
+
+    case "send_contact_message":
+      return async (input) => {
+        const form = mapping.contactForm;
+        if (!form) return notAvailable("a contact form");
+        if (form.support === "UNSUPPORTED") {
+          return textResult("This site's contact form cannot be submitted automatically.", {
+            sent: false,
+          });
+        }
+
+        if (input.confirmed !== true) {
+          return textResult("Set confirmed to true to submit this message.", { sent: false });
+        }
+        const confirmationId = asString(input.confirmationId, 100);
+        if (!confirmationId) {
+          return textResult("Provide the confirmationId from prepare_contact_message.", {
+            sent: false,
+          });
+        }
+
+        // Claiming marks the draft consumed up front, so this id can never
+        // drive a second submission even if the call is retried.
+        const claimed = claimDraft(confirmationId);
+        if (!claimed.ok) {
+          const explanation =
+            claimed.reason === "expired"
+              ? "That draft has expired. Prepare the message again."
+              : claimed.reason === "consumed"
+                ? "That draft has already been submitted."
+                : "That confirmationId is not recognised.";
+          return textResult(explanation, { sent: false, reason: claimed.reason });
+        }
+
+        // Final human approval, in the visitor's own browser. An agent cannot
+        // satisfy this on the person's behalf.
+        const approved = askForApproval(
+          ctx,
+          "This will submit this message through the portfolio's existing contact form. Continue?",
+        );
+        if (!approved) {
+          return textResult("The person at the browser declined. Nothing was submitted.", {
+            sent: false,
+            reason: "declined",
+          });
+        }
+
+        const outcome = fillAndSubmit(ctx.doc, form, claimed.draft);
+        if (!outcome.ok) {
+          const explanation =
+            outcome.reason === "form_missing"
+              ? "The contact form is no longer on this page. Nothing was submitted."
+              : outcome.reason === "invalid"
+                ? "The site's own form validation rejected the message. Nothing was submitted."
+                : "The contact form could not be filled in. Nothing was submitted.";
+          // Deliberately no automatic retry: the form may have partially
+          // processed the attempt, and re-submitting could duplicate a message.
+          return textResult(explanation, { sent: false, reason: outcome.reason });
+        }
+
+        // Careful wording: we handed the message to the site's own form. We
+        // have no visibility into whether it delivered any email.
+        return textResult(
+          "The portfolio's existing form submission was initiated.",
+          { sent: true, submitted: true },
+        );
+      };
+
     default: {
       const exhaustive: never = id;
       throw new Error(`Unhandled capability: ${String(exhaustive)}`);
@@ -388,6 +547,11 @@ export function capabilityIsSatisfied(id: CapabilityId, mapping: SiteMapping): b
       return Boolean(mapping.contact);
     case "navigate_site":
       return Boolean(mapping.navigation?.items.length);
+    case "prepare_contact_message":
+    case "send_contact_message":
+      // An UNSUPPORTED form (CAPTCHA, required upload) is worse than no tool:
+      // it would register an action that can only ever fail.
+      return Boolean(mapping.contactForm && mapping.contactForm.support !== "UNSUPPORTED");
     default:
       return false;
   }
@@ -429,7 +593,19 @@ export function collectLiveCounts(ctx: ToolContext): Record<string, number> {
   };
 
   record("projects", mapping.projects);
-  record("skills", mapping.skills);
+  if (mapping.skills && routeMatches(mapping.skills.route, pathname)) {
+    const skills = extractList(ctx.doc, mapping.skills, ctx.currentUrl());
+    const leafCount = skills.items.reduce(
+      (total, item) => total + (item.listFields?.items?.length ?? 0),
+      0,
+    );
+    if (leafCount > 0) {
+      counts.skills = leafCount;
+      counts.skillGroups = skills.matchCount;
+    } else {
+      counts.skills = skills.matchCount;
+    }
+  }
   record("experience", mapping.experience);
   record("education", mapping.education);
 

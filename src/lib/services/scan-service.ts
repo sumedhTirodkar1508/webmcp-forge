@@ -36,6 +36,7 @@ async function assertScanQuota(session: BuilderSession): Promise<void> {
   const since = new Date(Date.now() - 60 * 60 * 1000);
   const recent = await prisma.scanRun.count({
     where: {
+      // Anti-abuse is per browser session, which is what sessions are for now.
       site: { createdBySessionId: session.id },
       startedAt: { gte: since },
     },
@@ -122,6 +123,9 @@ export async function scanSite(
           pagesFailed: crawl.failures.length,
           deterministic: asJson({
             platform: crawl.representation.platform,
+            // What the live site actually pins, when the snippet was visible.
+            installedSnippet:
+              crawl.pages.find((page) => page.installedSnippet)?.installedSnippet ?? null,
             routePatterns: crawl.representation.routePatterns,
             navigation: crawl.representation.navigation,
             lowInformation: crawl.representation.lowInformation,

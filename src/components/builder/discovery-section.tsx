@@ -41,6 +41,9 @@ export function DiscoverySection() {
       lockedHint="Scan your site first."
       highlighted={lastChanged === "discovery"}
     >
+      <p aria-live="polite" className="sr-only">
+        {discovery ? `Scan complete. ${discovery.pagesScanned} pages scanned.` : ""}
+      </p>
       {discovery && (
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center gap-2">

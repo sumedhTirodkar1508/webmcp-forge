@@ -11,12 +11,30 @@ import type { PlatformId } from "@/lib/scanner/types";
 
 export const RUNTIME_PATH = "/runtime/v1.js";
 
-export function buildScriptTag(appOrigin: string, publicId: string): string {
+/**
+ * The installation snippet.
+ *
+ * Two attributes, with different jobs:
+ *
+ *   `data-wmf-site`   identifies the website — permanent, never changes.
+ *   `data-wmf-config` pins the EXACT configuration version to run.
+ *
+ * The pin is what makes this MVP safe without accounts. Anyone can generate a
+ * configuration in Forge, but nothing they generate executes here until
+ * somebody with deployment access to this website changes the number and
+ * redeploys.
+ */
+export function buildScriptTag(
+  appOrigin: string,
+  publicId: string,
+  configVersion: number,
+): string {
   return [
     "<script",
     "  defer",
     `  src="${appOrigin}${RUNTIME_PATH}"`,
-    `  data-wmf-site="${publicId}">`,
+    `  data-wmf-site="${publicId}"`,
+    `  data-wmf-config="${configVersion}">`,
     "</script>",
   ].join("\n");
 }

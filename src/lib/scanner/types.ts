@@ -63,6 +63,8 @@ export interface RepeatedField {
   samples: string[];
   /** Structural hints for semantic interpretation; never executable. */
   hints?: string[];
+  /** Count of direct list-item values when this field is a nested UL/OL. */
+  nestedItemCount?: number;
 }
 
 export interface RepeatedGroupContext {
@@ -117,6 +119,18 @@ export interface ContactSignals {
   phones: string[];
   /** `{ platform: "github", url: "https://github.com/..." }` */
   socials: Array<{ platform: string; url: string }>;
+  /** Bounded structural candidates only; never user-entered form content. */
+  forms?: ContactFormCandidate[];
+}
+
+export type ContactFormSupport = "SUPPORTED" | "UNSUPPORTED" | "UNCERTAIN";
+
+export interface ContactFormCandidate {
+  formSelector: string;
+  submitSelector?: string;
+  fields: Partial<Record<"name" | "email" | "subject" | "message", string>>;
+  support: ContactFormSupport;
+  reasons: string[];
 }
 
 export interface PlatformFingerprint {
@@ -152,6 +166,20 @@ export interface PageExtraction {
   sections: PageSection[];
   repeatedGroups: RepeatedGroup[];
   contact: ContactSignals;
+
+  /**
+   * A WebMCP Forge snippet already installed on this page, if one was found.
+   *
+   * This is the only reliable statement about which configuration the site is
+   * ACTUALLY running — the newest version generated in Forge says nothing
+   * about what has been deployed.
+   */
+  installedSnippet?: {
+    siteId: string;
+    configVersion: number | null;
+    /** The runtime URL the site loads. Forge-hosted, so a different host. */
+    runtimeSrc: string | null;
+  };
 
   /** Total visible text length, used to spot client-rendered pages. */
   textLength: number;

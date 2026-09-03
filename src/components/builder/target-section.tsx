@@ -43,8 +43,11 @@ export function TargetSection() {
     if (!trimmed) return;
     submitInFlight.current = true;
     try {
-      await actions.setTargetUrl(trimmed);
-      await actions.scan();
+      // Hand the scan the site the target call actually resolved to. Reading
+      // "the current site" here instead would race React's re-render and, when
+      // the address points somewhere new, scan the previous site.
+      const target = await actions.setTargetUrl(trimmed);
+      if (target.siteId) await actions.scan(target.siteId);
     } catch {
       // The error is already surfaced through `error` in context.
     } finally {

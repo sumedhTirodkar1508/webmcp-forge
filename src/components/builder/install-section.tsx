@@ -168,6 +168,9 @@ export function InstallSection() {
       lockedHint="Choose your capabilities first."
       highlighted={lastChanged === "install"}
     >
+      <p aria-live="polite" className="sr-only">
+        {copied ? "Snippet copied to clipboard." : copyFailed ? "Copying failed. Select the snippet and copy it manually." : ""}
+      </p>
       <div className="flex flex-col gap-4">
         <p className="text-sm text-muted-foreground">
           Install this once. Changing your settings here never requires editing your site again.
@@ -187,11 +190,51 @@ export function InstallSection() {
 
         {installation && instructions && (
           <div className="flex flex-col gap-4">
+            {/*
+              The distinction that matters: generating a configuration in Forge
+              does not change anything on the live website. Only the version
+              pinned in the deployed snippet runs.
+            */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-2xl border border-border bg-muted/40 p-3 text-sm">
+              <span className="text-muted-foreground">
+                Installed on your site:{" "}
+                <span className="font-medium text-foreground">
+                  {installation.installedVersion !== null
+                    ? `v${installation.installedVersion}`
+                    : "not detected yet"}
+                </span>
+              </span>
+              <span className="text-muted-foreground">
+                Latest generated in Forge:{" "}
+                <span className="font-medium text-foreground">
+                  v{installation.latestGeneratedVersion}
+                </span>
+              </span>
+            </div>
+
+            {installation.installedVersion !== null &&
+              installation.installedVersion !== installation.latestGeneratedVersion && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="rounded-2xl border border-border bg-card p-3 text-sm text-muted-foreground"
+                >
+                  This configuration will not affect your live site until you update{" "}
+                  <code className="font-mono">data-wmf-config</code> to{" "}
+                  <span className="font-medium text-foreground">
+                    {installation.latestGeneratedVersion}
+                  </span>{" "}
+                  and redeploy.
+                </p>
+              )}
+
             {installation.needsRegeneration && (
               <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
                 <p className="font-medium text-foreground">Your scan is newer than this configuration.</p>
                 <p className="mt-1 text-muted-foreground">
-                  Regenerate to publish the latest selectors and capability recommendations. The script tag on your site will not change.
+                  Generate a new configuration to capture the latest selectors and capability
+                  recommendations. You will then need to update the version number in your
+                  script tag and redeploy your site.
                 </p>
                 <Button
                   type="button"

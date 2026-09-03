@@ -1,5 +1,6 @@
 import type {
   ModelContext,
+  WebMcpExecuteToolOptions,
   WebMcpRegisteredTool,
   WebMcpRegisterToolOptions,
   WebMcpTextResult,
@@ -183,11 +184,179 @@ export async function listRegisteredTools(): Promise<WebMcpRegisteredTool[]> {
  * say so plainly instead of substituting a direct call and calling it the same
  * thing.
  */
+/**
+ * How this browser wants tool arguments passed.
+ *
+ * The current draft says `executeTool(tool, inputObject, options)`. Chrome's
+ * early preview instead expected the arguments pre-serialized as a JSON
+ * string, and rejects an object with "Failed to parse input arguments" before
+ * it ever dispatches to the tool.
+ */
+export type WebMcpInputMode = "unknown" | "object" | "serialized";
+
+/**
+ * The negotiated mode, per ModelContext.
+ *
+ * Keyed on the context object itself rather than stored globally or persisted:
+ * a full page load builds a new ModelContext and renegotiates, while SPA
+ * navigation within the same document keeps what was already learned. Nothing
+ * about a browser quirk belongs in the database.
+ */
+const inputModes = new WeakMap<ModelContext, Exclude<WebMcpInputMode, "unknown">>();
+
+/**
+ * Tools that may be used to LEARN the mode.
+ *
+ * Read-only tools qualify by definition. `prepare_contact_message` also
+ * qualifies, and deliberately so: it validates input and stages a draft in page
+ * memory, submitting nothing and contacting no server, so running it twice is
+ * indistinguishable from running it once.
+ *
+ * `send_contact_message` is absent on purpose and must never be added. It is
+ * the one tool where a retry could mean a second real form submission.
+ */
+const PROBE_SAFE_TOOLS = new Set(["prepare_contact_message"]);
+
+function isProbeSafe(tool: WebMcpRegisteredTool): boolean {
+  return tool.annotations?.readOnlyHint === true || PROBE_SAFE_TOOLS.has(tool.name);
+}
+
+/** The mode currently known for the live ModelContext. */
+export function getInputMode(): WebMcpInputMode {
+  const context = getModelContext();
+  if (!context) return "unknown";
+  return inputModes.get(context) ?? "unknown";
+}
+
+/** Test seam: forgets what was negotiated for the live ModelContext. */
+export function resetInputMode(): void {
+  const context = getModelContext();
+  if (context) inputModes.delete(context);
+}
+
+/**
+ * Calls `executeTool` with arguments in the given shape.
+ *
+ * `executeTool` is a WebIDL-backed native method bound to its ModelContext
+ * receiver, so the serialized form — which needs a cast the published types
+ * rightly disallow — must restore that receiver explicitly or the browser
+ * throws `TypeError: Illegal invocation`.
+ */
+async function callExecuteTool(
+  context: ModelContext,
+  tool: WebMcpRegisteredTool,
+  input: Record<string, unknown>,
+  options: WebMcpExecuteToolOptions,
+  mode: Exclude<WebMcpInputMode, "unknown">,
+): Promise<unknown> {
+  if (mode === "object") {
+    return context.executeTool(tool, input, options);
+  }
+
+  const legacyExecute = context.executeTool as unknown as (
+    this: ModelContext,
+    registeredTool: WebMcpRegisteredTool,
+    serializedInput: string,
+    executeOptions: WebMcpExecuteToolOptions,
+  ) => Promise<unknown>;
+
+  return legacyExecute.call(context, tool, JSON.stringify(input), options);
+}
+
+/**
+ * Matches ONLY the browser's pre-execution argument-parsing rejection.
+ *
+ * This is what makes negotiation safe: the error means the browser refused the
+ * arguments before dispatching, so the tool provably did not run. Any other
+ * failure — a handler error, an abort, or an `Illegal invocation` from a lost
+ * receiver — is real and must propagate untouched.
+ */
+function isInputParseFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (/illegal invocation/i.test(error.message)) return false;
+  return /failed to parse input arguments/i.test(error.message);
+}
+
+/**
+ * Executes a tool, negotiating the argument shape at most once per context.
+ *
+ * Once the mode is known every later call uses it directly, so a consequential
+ * tool never performs trial-and-error. When the mode is still unknown and the
+ * tool is not safe to probe, the standards form is attempted exactly once and
+ * a parse failure is reported honestly rather than retried — an unexplained
+ * second attempt at a submitting tool is worse than a clear error.
+ */
+async function executeWithNegotiation(
+  context: ModelContext,
+  tool: WebMcpRegisteredTool,
+  input: Record<string, unknown>,
+  options: WebMcpExecuteToolOptions,
+): Promise<unknown> {
+  const known = inputModes.get(context);
+  if (known) return callExecuteTool(context, tool, input, options, known);
+
+  try {
+    const result = await callExecuteTool(context, tool, input, options, "object");
+    inputModes.set(context, "object");
+    return result;
+  } catch (error) {
+    if (!isInputParseFailure(error) || !isProbeSafe(tool)) throw error;
+
+    const result = await callExecuteTool(context, tool, input, options, "serialized");
+    inputModes.set(context, "serialized");
+    return result;
+  }
+}
+
+/** A tool result, parsed when the browser handed back JSON text. */
+export interface NormalizedToolResult {
+  ok: true;
+  /** Parsed envelope when the payload was JSON; the raw text otherwise. */
+  result: WebMcpTextResult | string;
+  /** Exactly what the browser returned, before parsing. */
+  rawResult: string;
+  /** Which argument shape this browser turned out to want. */
+  inputMode: WebMcpInputMode;
+}
+
+export type ExecuteToolOutcome =
+  | NormalizedToolResult
+  | { ok: false; message: string }
+  | null;
+
+/**
+ * Chrome returns the tool result as a JSON string. Parsing it here means every
+ * caller — DevTools, the live relay, tests — sees one consistent shape instead
+ * of each re-parsing. A tool that legitimately returns plain text is preserved
+ * as text rather than treated as an error.
+ */
+function normalizeResult(raw: string, inputMode: WebMcpInputMode): NormalizedToolResult {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return { ok: true, result: JSON.parse(trimmed) as WebMcpTextResult, rawResult: raw, inputMode };
+    } catch {
+      // Not valid JSON after all; fall through and keep it as text.
+    }
+  }
+  return { ok: true, result: raw, rawResult: raw, inputMode };
+}
+
+/**
+ * Invokes a registered tool **through the browser's own WebMCP machinery**.
+ *
+ * This is genuine agent-path invocation, not a direct call to our handler: the
+ * browser looks the tool up among what it has registered and drives it.
+ *
+ * Returns null when the browser does not support `executeTool`, so callers can
+ * say so plainly instead of substituting a direct call and calling it the same
+ * thing.
+ */
 export async function executeRegisteredTool(
   name: string,
   input: Record<string, unknown> = {},
   signal?: AbortSignal,
-): Promise<{ ok: true; result: string } | { ok: false; message: string } | null> {
+): Promise<ExecuteToolOutcome> {
   const context = getModelContext();
   if (!context || typeof context.executeTool !== "function") return null;
 
@@ -197,8 +366,14 @@ export async function executeRegisteredTool(
     if (!tool) {
       return { ok: false, message: `No registered tool named ${name}.` };
     }
-    const result = await context.executeTool(tool, input, signal ? { signal } : {});
-    return { ok: true, result };
+
+    const options = signal ? { signal } : {};
+    const result = await executeWithNegotiation(context, tool, input, options);
+
+    if (typeof result !== "string") {
+      return { ok: false, message: "The browser returned an invalid tool result." };
+    }
+    return normalizeResult(result, inputModes.get(context) ?? "unknown");
   } catch (error) {
     return {
       ok: false,

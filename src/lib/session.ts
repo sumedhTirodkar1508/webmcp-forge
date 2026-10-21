@@ -105,6 +105,33 @@ export async function requireBuilderSession(): Promise<BuilderSession> {
 }
 
 /**
+ * The site this browser was last working on.
+ *
+ * A site is permanent per origin, so the first browser to scan an origin is
+ * its "creator" forever. Looking up "the newest site this session created"
+ * therefore lost the owner's place whenever they worked on an origin someone
+ * else had scanned first — the shared demo portfolio for every visitor after
+ * the first, or a returning owner with a fresh cookie. Reloading showed an
+ * empty builder.
+ *
+ * This remembers the last targeted site id instead. It grants nothing: any
+ * site's builder state can already be loaded by id.
+ */
+export const CURRENT_SITE_COOKIE = "wmf_site";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Only callable from a Server Function or Route Handler (it writes a cookie). */
+export async function rememberCurrentSite(siteId: string): Promise<void> {
+  (await cookies()).set(CURRENT_SITE_COOKIE, siteId, cookieOptions(SESSION_TTL_MS / 1000));
+}
+
+export async function readRememberedSiteId(): Promise<string | null> {
+  const value = (await cookies()).get(CURRENT_SITE_COOKIE)?.value;
+  return value && UUID_PATTERN.test(value) ? value : null;
+}
+
+/**
  * Loads a site the caller is allowed to touch.
  *
  * Never trust a site id from the browser: ownership is re-checked here on every

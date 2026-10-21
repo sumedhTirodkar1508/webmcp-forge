@@ -118,6 +118,9 @@ export async function interpretScan(
     // scan while retaining the deterministic heuristic as the final safety net.
     fallbackTimeoutMs: Math.min(5_000, env.GEMINI_REQUEST_TIMEOUT_MS),
     maxRetriesPerModel: env.GEMINI_MAX_RETRIES_PER_MODEL,
+    // Bounds the whole chain, so a run of slow fallbacks cannot outlive the
+    // request; on exhaustion the scan uses the heuristic mapping instead.
+    budgetMs: env.SCAN_AI_BUDGET_MS,
     onAttempt: options.onAttempt,
     call: async (model, signal) => {
       const response = await client.models.generateContent({

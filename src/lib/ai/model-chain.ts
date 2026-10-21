@@ -46,7 +46,21 @@ export interface RunModelChainOptions<T> {
   random?: () => number;
   /** Injectable for tests. Default: Date.now. */
   now?: () => number;
+  /**
+   * Total wall-clock budget across every model and retry, in milliseconds.
+   *
+   * Per-request timeouts bound a single call, not the chain: three models with
+   * retries can add up to far longer than the request serving them is allowed
+   * to live. With a budget, each request's timeout is clamped to what remains,
+   * and no new attempt starts once too little is left — the caller then falls
+   * back as it would for any other failure. Omitted means unbounded, which is
+   * the original behaviour.
+   */
+  budgetMs?: number;
 }
+
+/** Starting an attempt with less than this left would only waste a request. */
+const MIN_ATTEMPT_MS = 1_000;
 
 export interface ModelChainSuccess<T> {
   ok: true;
@@ -112,6 +126,7 @@ export async function runModelChain<T>(
 
   const attempts: AiAttemptRecord[] = [];
   let lastFailure: AiFailure = { kind: "SCHEMA_INVALID", code: "schema_invalid" };
+  const deadline = o.budgetMs === undefined ? Number.POSITIVE_INFINITY : now() + o.budgetMs;
 
   for (const [modelIndex, model] of o.models.entries()) {
     let transientRetriesUsed = 0;
@@ -119,10 +134,23 @@ export async function runModelChain<T>(
     let attemptNumber = 0;
 
     for (;;) {
+      const remaining = deadline - now();
+      if (remaining < MIN_ATTEMPT_MS) {
+        // Out of budget: report it as a timeout so callers degrade exactly as
+        // they would for a slow provider.
+        return {
+          ok: false,
+          attempts,
+          failure: { kind: "TIMEOUT", code: "budget_exhausted" },
+        };
+      }
+
       attemptNumber += 1;
       const controller = new AbortController();
-      const requestTimeoutMs =
-        modelIndex === 0 ? o.timeoutMs : (o.fallbackTimeoutMs ?? o.timeoutMs);
+      const requestTimeoutMs = Math.min(
+        modelIndex === 0 ? o.timeoutMs : (o.fallbackTimeoutMs ?? o.timeoutMs),
+        remaining,
+      );
       const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
       const startedAt = now();
 
@@ -217,7 +245,7 @@ export async function runModelChain<T>(
             failure.retryAfterSeconds !== undefined
               ? Math.min(30000, failure.retryAfterSeconds * 1000)
               : backoffDelayMs(transientRetriesUsed, random);
-          await sleep(delayMs);
+          await sleep(Math.max(0, Math.min(delayMs, deadline - now())));
           continue; // retry same model
         }
         break; // move to next model
@@ -226,7 +254,7 @@ export async function runModelChain<T>(
       // TRANSIENT and UNKNOWN failures retain bounded same-model retries.
       if (transientRetriesUsed < maxRetriesPerModel) {
         transientRetriesUsed += 1;
-        await sleep(backoffDelayMs(transientRetriesUsed, random));
+        await sleep(Math.max(0, Math.min(backoffDelayMs(transientRetriesUsed, random), deadline - now())));
         continue; // retry same model
       }
       break; // move to next model

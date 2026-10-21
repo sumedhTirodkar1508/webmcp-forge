@@ -68,10 +68,25 @@ const schema = z.object({
 
   APP_BASE_URL: z.url().default("http://localhost:3000"),
 
+  /**
+   * A portfolio first-time visitors can try without one of their own. Set it
+   * to an empty string to hide the "Try the demo" button.
+   */
+  DEMO_PORTFOLIO_URL: z
+    .union([z.url(), z.literal("")])
+    .default("https://webmcp-forge-demo-portfolio.vercel.app/"),
+
   SCAN_MAX_PAGES: intFrom(10, 1, 50),
   SCAN_REQUEST_TIMEOUT_MS: intFrom(10_000, 1_000, 60_000),
   SCAN_MAX_HTML_BYTES: intFrom(2_000_000, 10_000, 20_000_000),
   SCAN_MAX_REDIRECTS: intFrom(3, 0, 10),
+  /**
+   * Wall-clock budget for crawling, before interpretation starts. Keeps a slow
+   * site from outliving the request; the scan proceeds with what it gathered.
+   */
+  SCAN_TIME_BUDGET_MS: intFrom(25_000, 3_000, 120_000),
+  /** Wall-clock budget for the AI interpretation step, across all fallbacks. */
+  SCAN_AI_BUDGET_MS: intFrom(30_000, 3_000, 120_000),
   SCAN_MAX_PER_SESSION_PER_HOUR: intFrom(10, 1, 1000),
 
   VERIFICATION_CHALLENGE_TTL_SECONDS: intFrom(300, 30, 3600),

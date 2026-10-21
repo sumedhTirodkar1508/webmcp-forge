@@ -37,6 +37,15 @@ interface BuilderContextValue {
   state: BuilderState;
   phase: Phase;
   error: string | null;
+  /**
+   * Which section produced `error` — the same key passed to `run()`, e.g.
+   * "target", "discovery", "capability:get_skills", "install", "verify".
+   *
+   * Errors used to be rendered only by Step 1, so a failed capability toggle
+   * or a failed "Generate configuration" reported itself at the top of the
+   * page, often scrolled out of view. Each section now shows its own.
+   */
+  errorSection: string | null;
   webmcp: WebMcpAvailability;
   /** Tool names the browser accepted from this page. */
   registeredTools: string[];
@@ -58,6 +67,7 @@ export interface LiveTestState {
   expiresAt: string | null;
   availableTools: string[];
   starting: boolean;
+  testUrl?: string | null;
 }
 
 export interface ChatTurn {
@@ -136,6 +146,7 @@ export function BuilderProvider({
   const [state, setState] = useState<BuilderState>(initialState);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [errorSection, setErrorSection] = useState<string | null>(null);
   const [lastChanged, setLastChanged] = useState<string | null>(null);
   const [registeredTools, setRegisteredTools] = useState<string[]>([]);
   const [chat, setChat] = useState<ChatTurn[]>([]);
@@ -174,6 +185,7 @@ export function BuilderProvider({
    * can be recognised and discarded instead of overwriting the new one.
    */
   const siteEpochRef = useRef(0);
+  const liveAttemptRef = useRef(0);
 
   const applyState = useCallback((next: BuilderState) => {
     stateRef.current = next;
@@ -188,7 +200,7 @@ export function BuilderProvider({
    */
   const applyIfCurrent = useCallback(
     (epoch: number, next: BuilderState): boolean => {
-      if (epoch !== siteEpochRef.current) return false;
+      if (epoch !== siteEpochRef.current || next.siteId !== stateRef.current.siteId) return false;
       applyState(next);
       return true;
     },
@@ -220,6 +232,7 @@ export function BuilderProvider({
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : "Something went wrong.";
         setError(message);
+        setErrorSection(section);
         throw cause;
       } finally {
         setPhase("idle");
@@ -246,6 +259,7 @@ export function BuilderProvider({
           // and any request still in flight for it must be discarded.
           if (next.siteId !== previousSiteId) {
             siteEpochRef.current += 1;
+            liveAttemptRef.current += 1;
             setChat([]);
             setLiveTest({
               connected: false,
@@ -355,6 +369,7 @@ export function BuilderProvider({
     const siteId = stateRef.current.siteId;
     if (!siteId) return;
     const epoch = siteEpochRef.current;
+    const attempt = liveAttemptRef.current;
     try {
       const response = await fetch(
         `/api/builder/live-test?siteId=${encodeURIComponent(siteId)}`,
@@ -366,8 +381,18 @@ export function BuilderProvider({
         availableTools: string[];
       };
       // A READY event for the demo must never light up production's panel.
-      if (!isCurrentEpoch(epoch)) return;
-      setLiveTest((current) => ({ ...current, ...next, starting: false }));
+      if (!isCurrentEpoch(epoch) || attempt !== liveAttemptRef.current) return;
+      setLiveTest((current) => {
+        const waiting = current.starting && !next.connected &&
+          (!current.expiresAt || Date.parse(current.expiresAt) > Date.now());
+        return {
+          ...current,
+          ...next,
+          expiresAt: waiting ? current.expiresAt : next.expiresAt,
+          starting: waiting,
+          testUrl: waiting ? current.testUrl : null,
+        };
+      });
     } catch {
       // A failed poll is not worth surfacing; the next one may succeed.
     }
@@ -378,31 +403,40 @@ export function BuilderProvider({
     const siteId = stateRef.current.siteId;
     if (!siteId) return;
     const epoch = siteEpochRef.current;
+    const attempt = ++liveAttemptRef.current;
 
     setLiveTest((current) => ({ ...current, starting: true }));
     try {
-      const { testUrl } = await postJson<{ testUrl: string }>("/api/builder/live-test", {
+      const { testUrl, expiresAt } = await postJson<{ testUrl: string; expiresAt: string }>("/api/builder/live-test", {
         siteId,
       });
       // The user may have switched sites while the session was being opened.
-      if (!isCurrentEpoch(epoch)) return;
+      if (!isCurrentEpoch(epoch) || attempt !== liveAttemptRef.current) return;
+      setLiveTest((current) => ({ ...current, testUrl, expiresAt }));
       window.open(testUrl, "_blank", "noopener,noreferrer");
     } catch (cause) {
-      if (!isCurrentEpoch(epoch)) return;
+      if (!isCurrentEpoch(epoch) || attempt !== liveAttemptRef.current) return;
       setLiveTest((current) => ({ ...current, starting: false }));
       setError(cause instanceof Error ? cause.message : "Could not start the live test.");
+      setErrorSection("ask");
     }
   }, [isCurrentEpoch]);
 
   const stopLive = useCallback(async () => {
     const siteId = stateRef.current.siteId;
     if (!siteId) return;
+    const epoch = siteEpochRef.current;
+    const attempt = ++liveAttemptRef.current;
     try {
       await postJson("/api/builder/live-test", { siteId, action: "stop" });
-    } finally {
+      if (!isCurrentEpoch(epoch) || attempt !== liveAttemptRef.current) return;
       setLiveTest({ connected: false, expiresAt: null, availableTools: [], starting: false });
+    } catch (cause) {
+      if (!isCurrentEpoch(epoch) || attempt !== liveAttemptRef.current) return;
+      setError(cause instanceof Error ? cause.message : "Could not end the live test. Try again.");
+      setErrorSection("ask");
     }
-  }, []);
+  }, [isCurrentEpoch]);
 
   /**
    * Asks the readiness assistant a question.
@@ -487,11 +521,15 @@ export function BuilderProvider({
       state,
       phase,
       error,
+      errorSection,
       webmcp,
       registeredTools,
       actions,
       lastChanged,
-      dismissError: () => setError(null),
+      dismissError: () => {
+        setError(null);
+        setErrorSection(null);
+      },
       liveTest,
       chat,
       askAgent,
@@ -503,6 +541,7 @@ export function BuilderProvider({
       state,
       phase,
       error,
+      errorSection,
       webmcp,
       registeredTools,
       actions,

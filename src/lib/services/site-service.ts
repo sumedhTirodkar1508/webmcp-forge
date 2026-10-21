@@ -2,6 +2,7 @@ import "server-only";
 
 import type { BuilderSession, Site } from "@/generated/prisma/client";
 import { AppError } from "@/lib/errors";
+import { urlRejectionError } from "@/lib/scanner/url-errors";
 import { generatePublicSiteId } from "@/lib/ids";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -85,10 +86,7 @@ export async function setTargetUrl(
 
   const safety = await assertSafeUrl(rawUrl.trim());
   if (!safety.ok || !safety.url) {
-    throw new AppError(
-      safety.reason === "invalid_url" ? "INVALID_URL" : "BLOCKED_TARGET",
-      safety.message ?? "That address cannot be scanned.",
-    );
+    throw urlRejectionError(safety.reason);
   }
 
   const canonicalUrl = safety.url.toString();

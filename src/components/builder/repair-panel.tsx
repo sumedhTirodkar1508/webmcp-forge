@@ -115,7 +115,7 @@ export function RepairPanel() {
   const preview = proposal?.siteId === state.siteId ? proposal.preview : null;
 
   return (
-    <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+    <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 p-4">
       <div className="flex items-start gap-2">
         <Wrench aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
         <div className="flex-1">
@@ -148,8 +148,8 @@ export function RepairPanel() {
       {applied && (
         <Alert>
           <AlertDescription>
-            Repair published as a new configuration version. Run Check Installation again to
-            confirm it on your live site.
+            Repair saved as a new configuration version. Copy the updated snippet above,
+            publish it on your site, then check the installation again.
           </AlertDescription>
         </Alert>
       )}
@@ -164,7 +164,7 @@ export function RepairPanel() {
                 <li key={change.section} className="flex items-start gap-2 text-sm">
                   <Icon
                     aria-hidden
-                    className={`mt-0.5 size-4 shrink-0 ${bad ? "text-destructive" : "text-emerald-600 dark:text-emerald-400"}`}
+                    className={`mt-0.5 size-4 shrink-0 ${bad ? "text-destructive" : "text-success"}`}
                   />
                   <span className="text-foreground">{change.summary}</span>
                 </li>

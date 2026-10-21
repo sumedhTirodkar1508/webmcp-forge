@@ -44,6 +44,19 @@ export interface DiscoverySummary {
   aiModel: string | null;
   aiFellBack: boolean;
   scannedAt: string | null;
+  /**
+   * A WebMCP Forge snippet found in the site's HTML, if any.
+   *
+   * `matchesThisSite` is false when the snippet names a DIFFERENT site id —
+   * typically a snippet copied from another site or an old test. Surfacing
+   * that tells the owner exactly why their site isn't reporting back, instead
+   * of leaving them to guess.
+   */
+  installedSnippet: {
+    siteId: string;
+    configVersion: number | null;
+    matchesThisSite: boolean;
+  } | null;
 }
 
 export interface InstallationState {

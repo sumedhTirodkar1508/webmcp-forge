@@ -5,6 +5,17 @@ import { getBuilderState } from "@/lib/services/builder-service";
 import { scanSite } from "@/lib/services/scan-service";
 import { requireBuilderSession } from "@/lib/session";
 
+/**
+ * Upper bound on this request, in seconds.
+ *
+ * Sized to the internal budgets rather than left to the platform default: the
+ * crawl and every AI step now stop themselves inside these limits, so a slow
+ * site degrades to a partial scan (or an honest "unavailable") instead of a
+ * killed function and a generic error.
+ */
+export const maxDuration = 60;
+
+
 const bodySchema = z.object({ siteId: z.uuid() });
 
 /**

@@ -2,10 +2,19 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
+/* Dark mode follows the visitor's system setting. Nothing in the app toggles a
+   `.dark` class, so the class-based variant meant dark styles never applied. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
 
 @theme inline {
   --color-background: var(--background);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
@@ -49,7 +58,19 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
+  color-scheme: light dark;
+  /* A faint tint, so white step cards read as surfaces rather than floating. */
+  --background: oklch(0.984 0.002 325);
+  /* Forge ember: progress, the current step and the mark. Deep enough for white
+     text at 4.5:1. */
+  --brand: oklch(0.56 0.19 40);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-soft: oklch(0.965 0.03 50);
+  /* Outcome colours. Text-safe on cards; the -soft variants are backgrounds. */
+  --success: oklch(0.52 0.13 155);
+  --success-soft: oklch(0.965 0.035 155);
+  --warning: oklch(0.54 0.13 60);
+  --warning-soft: oklch(0.975 0.04 85);
   --foreground: oklch(0.145 0.008 326);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0.008 326);
@@ -83,38 +104,47 @@
   --sidebar-ring: oklch(0.711 0.019 323.02);
 }
 
-.dark {
-  --background: oklch(0.145 0.008 326);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.212 0.019 322.12);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.212 0.019 322.12);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0.005 325.62);
-  --primary-foreground: oklch(0.212 0.019 322.12);
-  --secondary: oklch(0.263 0.024 320.12);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.263 0.024 320.12);
-  --muted-foreground: oklch(0.711 0.019 323.02);
-  --accent: oklch(0.263 0.024 320.12);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.542 0.034 322.5);
-  --chart-1: oklch(0.845 0.143 164.978);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.596 0.145 163.225);
-  --chart-4: oklch(0.508 0.118 165.612);
-  --chart-5: oklch(0.432 0.095 166.913);
-  --sidebar: oklch(0.212 0.019 322.12);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.263 0.024 320.12);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.542 0.034 322.5);
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.145 0.008 326);
+    --brand: oklch(0.74 0.16 52);
+    --brand-foreground: oklch(0.2 0.03 40);
+    --brand-soft: oklch(0.27 0.05 45);
+    --success: oklch(0.78 0.14 155);
+    --success-soft: oklch(0.26 0.045 155);
+    --warning: oklch(0.82 0.13 80);
+    --warning-soft: oklch(0.28 0.05 75);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.212 0.019 322.12);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.212 0.019 322.12);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0.005 325.62);
+    --primary-foreground: oklch(0.212 0.019 322.12);
+    --secondary: oklch(0.263 0.024 320.12);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.263 0.024 320.12);
+    --muted-foreground: oklch(0.711 0.019 323.02);
+    --accent: oklch(0.263 0.024 320.12);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.542 0.034 322.5);
+    --chart-1: oklch(0.845 0.143 164.978);
+    --chart-2: oklch(0.696 0.17 162.48);
+    --chart-3: oklch(0.596 0.145 163.225);
+    --chart-4: oklch(0.508 0.118 165.612);
+    --chart-5: oklch(0.432 0.095 166.913);
+    --sidebar: oklch(0.212 0.019 322.12);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.263 0.024 320.12);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.542 0.034 322.5);
+  }
 }
 
 @layer base {
@@ -129,5 +159,21 @@
   }
   html {
     @apply font-sans;
+    scroll-behavior: smooth;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+}
+
+/* The scan progress bar: a sliver that sweeps across, for work of unknown length. */
+@keyframes forge-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
   }
 }

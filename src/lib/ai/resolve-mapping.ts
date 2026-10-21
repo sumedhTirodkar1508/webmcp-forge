@@ -72,13 +72,13 @@ function resolveList(
 
   const page = findPage(representation, selection.pageUrl);
   if (!page) {
-    warnings.push(`Could not locate the page the ${label} list was said to be on.`);
+    warnings.push(`We couldn't find your ${label} on the pages we read, so agents won't be able to list them yet.`);
     return undefined;
   }
 
   const group = findGroup(page, selection.groupId);
   if (!group) {
-    warnings.push(`Could not locate the ${label} list on ${page.pathname}.`);
+    warnings.push(`We couldn't pin down your ${label} on ${page.pathname}, so agents won't be able to list them yet.`);
     return undefined;
   }
 
@@ -134,7 +134,7 @@ function resolveList(
   }
 
   if (Object.keys(fields).length === 0) {
-    warnings.push(`The ${label} list had no readable fields.`);
+    warnings.push(`We found your ${label}, but couldn't read their details reliably.`);
     return undefined;
   }
 
@@ -164,7 +164,7 @@ function resolveProfile(
 
   const page = findPage(representation, selection.pageUrl);
   if (!page) {
-    warnings.push("Could not locate the page the profile was said to be on.");
+    warnings.push("We couldn't find a clear introduction about you, so \"Learn about me\" may be limited.");
     return undefined;
   }
 
@@ -197,7 +197,7 @@ function resolveProfile(
       fields.headline = { selector, source: "text" };
     }
     if (belongsToCollection) {
-      warnings.push("The selected profile headline belonged to a repeated content collection and was skipped.");
+      warnings.push("We skipped a headline that looked like part of a list rather than your introduction.");
     }
   }
 
@@ -211,11 +211,11 @@ function resolveProfile(
   if (section && (section.repeatedItemCount ?? 0) < 4) {
     fields.bio = { selector: section.selector, source: "text" };
   } else if (section) {
-    warnings.push("The selected profile biography was a repeated content collection and was skipped.");
+    warnings.push("We skipped a bio that looked like part of a list rather than your introduction.");
   }
 
   if (Object.keys(fields).length === 0) {
-    warnings.push("No profile text could be located.");
+    warnings.push("We couldn't find an introduction about you on the pages we read.");
     return undefined;
   }
 
@@ -379,7 +379,7 @@ export function resolveMapping(
   const parsed = siteMappingSchema.safeParse(draft);
   const mapping: SiteMapping = parsed.success ? parsed.data : { version: 1 };
   if (!parsed.success) {
-    warnings.push("Some discovered structure could not be saved safely and was skipped.");
+    warnings.push("Some of what we found couldn't be saved safely, so it was left out.");
   }
 
   return {
@@ -564,7 +564,7 @@ export function deriveHeuristicMapping(
       : undefined;
 
   if (!projects) {
-    warnings.push("Projects were identified without AI assistance and may be incomplete.");
+    warnings.push("Your projects were detected without AI help, so the list may be incomplete. Scanning again later may improve it.");
   }
 
   const draft: SiteMapping = {

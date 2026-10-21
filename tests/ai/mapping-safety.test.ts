@@ -326,7 +326,8 @@ describe("resolveMapping", () => {
     expect(resolved.mapping.profile?.fields).toEqual({
       name: { selector: "#hero-title", source: "text" },
     });
-    expect(resolved.warnings.join(" ")).toContain("repeated content collection");
+    // Skipped and reported, in words a portfolio owner understands.
+    expect(resolved.warnings.join(" ")).toContain("part of a list rather than your introduction");
   });
 
   it("fills omitted semantic roles only from scanner-owned field candidates", () => {

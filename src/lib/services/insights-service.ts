@@ -134,7 +134,11 @@ export async function buildInsights(site: Site): Promise<InsightsSummary> {
         getEnv().GEMINI_NL_DEMO_MAX_QUESTIONS - questionsUsed,
       ),
       lastModel: lastSuccess?.model ?? null,
-      lastFellBack: Boolean(lastSuccess && lastSuccess.model.includes("3.1")),
+      // Compared against the configured primary rather than guessed from the
+      // model name, which broke silently whenever model ids changed.
+      lastFellBack: Boolean(
+        lastSuccess && lastSuccess.model !== getEnv().GEMINI_NL_DEMO_PRIMARY_MODEL,
+      ),
       lastLatencyMs: lastSuccess?.latencyMs ?? null,
     },
     contact: {

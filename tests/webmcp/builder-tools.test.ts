@@ -38,6 +38,7 @@ const READY_STATE: BuilderState = {
     aiModel: null,
     aiFellBack: false,
     scannedAt: "2026-09-02T00:00:00.000Z",
+    installedSnippet: null,
   },
   capabilities: [
     {

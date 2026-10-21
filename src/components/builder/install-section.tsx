@@ -1,12 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { CheckIcon, CopyIcon, Loader2Icon } from "lucide-react";
+import {
+  ArrowUpRightIcon,
+  CheckIcon,
+  CircleDashedIcon,
+  CopyIcon,
+  Loader2Icon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useBuilder } from "@/components/builder/builder-provider";
+import { Callout } from "@/components/builder/callout";
+import { SectionError } from "@/components/builder/section-error";
+import { isInstalled, stepStateFor } from "@/components/builder/progress";
 import { StepShell } from "@/components/builder/step-shell";
 import type { PlatformId } from "@/lib/scanner/types";
+import { cn } from "@/lib/utils";
 
 /**
  * Platform install instructions, mirrored from `src/lib/services/install-service.ts`.
@@ -135,6 +145,7 @@ export function InstallSection() {
   async function handleCopy() {
     if (!installation) return;
     setCopyFailed(false);
+    setCopied(false);
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(installation.scriptTag);
@@ -145,8 +156,11 @@ export function InstallSection() {
         textarea.style.opacity = "0";
         document.body.appendChild(textarea);
         textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
+        try {
+          if (!document.execCommand("copy")) throw new Error("Copy failed");
+        } finally {
+          textarea.remove();
+        }
       }
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
@@ -159,142 +173,211 @@ export function InstallSection() {
     ? INSTALL_INSTRUCTIONS_BY_PLATFORM[installation.platform]
     : null;
 
+  // A snippet is on the site, but it names some other Forge site.
+  const detected = state.discovery?.installedSnippet ?? null;
+  const foreignSnippet = detected && !detected.matchesThisSite ? detected : null;
+
+  const installed = installation?.installedVersion ?? null;
+  const outdated =
+    installation !== null && installed !== null && installed !== installation.latestGeneratedVersion;
+
   return (
     <StepShell
-      step={4}
+      step={3}
+      id="step-install"
       title="Install the snippet"
-      subtitle="One script tag, added once, on every page of your site."
-      status={state.capabilities.length === 0 ? "locked" : installation ? "done" : "active"}
-      lockedHint="Choose your capabilities first."
+      subtitle="Generate your snippet, then paste it into every page of your site and publish."
+      // Done only once the snippet is actually seen on the site (or verified).
+      // Generating a configuration installs nothing, and this used to show a
+      // checkmark the moment one was generated.
+      status={
+        state.capabilities.length === 0 ? "locked" : isInstalled(state) ? "done" : "active"
+      }
+      current={stepStateFor(state, "install") === "current"}
+      lockedHint="Scan your site first — then you can choose capabilities and generate a snippet."
       highlighted={lastChanged === "install"}
     >
       <p aria-live="polite" className="sr-only">
         {copied ? "Snippet copied to clipboard." : copyFailed ? "Copying failed. Select the snippet and copy it manually." : ""}
       </p>
-      <div className="flex flex-col gap-4">
-        <p className="text-sm text-muted-foreground">
-          Install the runtime once. When you generate a new configuration, update{" "}
-          <code className="font-mono">data-wmf-config</code> to the new version and redeploy
-          your site.
-        </p>
+      <div className="flex flex-col gap-5">
+        <SectionError sections={["install"]} />
 
         {!installation && (
-          <Button
-            type="button"
-            onClick={() => void actions.generateInstallation()}
-            disabled={generating}
-            className="self-start"
-          >
-            {generating && <Loader2Icon className="animate-spin" />}
-            {generating ? "Generating…" : "Generate installation"}
-          </Button>
+          <div className="flex flex-col items-start gap-3">
+            <p className="text-sm text-muted-foreground">
+              We&apos;ll save your choices as version 1 and give you one script tag to add to your
+              site. Nothing changes on your site until you paste it in and publish.
+            </p>
+            <Button
+              type="button"
+              size="lg"
+              onClick={() => void actions.generateInstallation().catch(() => {})}
+              disabled={generating}
+            >
+              {generating && <Loader2Icon className="animate-spin" />}
+              {generating ? "Generating…" : "Generate my snippet"}
+            </Button>
+          </div>
         )}
 
         {installation && instructions && (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-5">
             {/*
               The distinction that matters: generating a configuration in Forge
               does not change anything on the live website. Only the version
               pinned in the deployed snippet runs.
             */}
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-2xl border border-border bg-muted/40 p-3 text-sm">
-              <span className="text-muted-foreground">
-                Installed on your site:{" "}
-                <span className="font-medium text-foreground">
-                  {installation.installedVersion !== null
-                    ? `v${installation.installedVersion}`
-                    : "not detected yet"}
-                </span>
-              </span>
-              <span className="text-muted-foreground">
-                Latest generated in Forge:{" "}
-                <span className="font-medium text-foreground">
-                  v{installation.latestGeneratedVersion}
-                </span>
-              </span>
-            </div>
+            <dl className="grid gap-2.5 sm:grid-cols-2">
+              <div
+                className={cn(
+                  "flex flex-col gap-1 rounded-2xl border px-3.5 py-3",
+                  installed !== null && !outdated
+                    ? "border-success/25 bg-success-soft"
+                    : "border-border bg-muted/40",
+                )}
+              >
+                <dt className="text-xs text-muted-foreground">On your live site</dt>
+                <dd className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                  {installed !== null ? (
+                    <>
+                      <CheckIcon aria-hidden className="size-4 text-success" strokeWidth={2.5} />
+                      Version {installed}
+                    </>
+                  ) : (
+                    <>
+                      <CircleDashedIcon aria-hidden className="size-4 text-muted-foreground" />
+                      Not detected yet
+                    </>
+                  )}
+                </dd>
+              </div>
+              <div className="flex flex-col gap-1 rounded-2xl border border-border bg-muted/40 px-3.5 py-3">
+                <dt className="text-xs text-muted-foreground">Latest generated in Forge</dt>
+                <dd className="text-sm font-semibold text-foreground">
+                  Version {installation.latestGeneratedVersion}
+                </dd>
+              </div>
+            </dl>
 
-            {installation.installedVersion !== null &&
-              installation.installedVersion !== installation.latestGeneratedVersion && (
-                <p
-                  role="status"
-                  aria-live="polite"
-                  className="rounded-2xl border border-border bg-card p-3 text-sm text-muted-foreground"
-                >
-                  This configuration will not affect your live site until you update{" "}
-                  <code className="font-mono">data-wmf-config</code> to{" "}
-                  <span className="font-medium text-foreground">
-                    {installation.latestGeneratedVersion}
-                  </span>{" "}
-                  and redeploy.
-                </p>
-              )}
+            {installed === null && !foreignSnippet && (
+              <p className="-mt-2 text-xs text-muted-foreground">
+                We look for the snippet each time we scan your site. After you publish it, use{" "}
+                <a href="#step-verify" className="font-medium text-foreground underline underline-offset-3">
+                  Check installation
+                </a>{" "}
+                below to confirm.
+              </p>
+            )}
+
+            {outdated && (
+              <Callout role="status" title="Your live site is running an older version">
+                Change <code className="font-mono text-foreground">data-wmf-config</code> in your
+                script tag to{" "}
+                <span className="font-medium text-foreground">
+                  {installation.latestGeneratedVersion}
+                </span>{" "}
+                and republish. Until then, your site keeps using version {installed}.
+              </Callout>
+            )}
+
+            {foreignSnippet && (
+              <Callout role="status" title="Your site has a WebMCP Forge snippet — but for a different site">
+                The snippet we found uses{" "}
+                <code className="break-all font-mono text-foreground">{foreignSnippet.siteId}</code>,
+                not this site&apos;s{" "}
+                <code className="break-all font-mono text-foreground">{installation.publicId}</code>.
+                It may have been copied from another site or an earlier test. Replace it with the
+                snippet below so this configuration is the one your site runs.
+              </Callout>
+            )}
 
             {installation.needsRegeneration && (
-              <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-                <p className="font-medium text-foreground">Your scan is newer than this configuration.</p>
-                <p className="mt-1 text-muted-foreground">
-                  Generate a new configuration to capture the latest selectors and capability
-                  recommendations. You will then need to update the version number in your
-                  script tag and redeploy your site.
-                </p>
+              <Callout title="Your configuration needs updating">
+                Generate a new configuration to include your latest scan and capability choices. Then update the
+                version number in your script tag and republish your site.
                 <Button
                   type="button"
                   variant="outline"
-                  className="mt-3"
-                  onClick={() => void actions.generateInstallation()}
+                  size="sm"
+                  className="mt-3 flex"
+                  onClick={() => void actions.generateInstallation().catch(() => {})}
                   disabled={generating}
                 >
                   {generating && <Loader2Icon className="animate-spin" />}
                   {generating ? "Regenerating…" : "Regenerate configuration"}
                 </Button>
-              </div>
+              </Callout>
             )}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-muted-foreground">Your script tag</span>
-                <Button type="button" variant="outline" size="sm" onClick={handleCopy}>
+
+            <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
+              <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3.5 py-2">
+                <span className="text-xs text-zinc-400">
+                  Your script tag · paste into <code className="font-mono">&lt;head&gt;</code>
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleCopy}
+                  className="h-7 bg-white/10 text-zinc-100 hover:bg-white/20"
+                >
                   {copied ? <CheckIcon /> : <CopyIcon />}
                   {copied ? "Copied" : "Copy"}
                 </Button>
               </div>
-              <pre className="overflow-x-auto rounded-2xl border border-border bg-muted/40 p-3 text-xs break-all whitespace-pre-wrap">
-                {installation.scriptTag}
+              <pre className="overflow-x-auto px-3.5 py-3 font-mono text-xs leading-relaxed">
+                <code>{installation.scriptTag}</code>
               </pre>
-              {copyFailed && (
-                <p className="text-xs text-muted-foreground">
-                  Copy didn&apos;t work automatically — select the text above and copy it manually.
-                </p>
-              )}
             </div>
-
-            <div className="flex flex-col gap-2">
-              <p className="text-sm font-medium text-foreground">
-                {instructions.platformLabel}: {instructions.summary}
+            {copyFailed && (
+              <p className="-mt-3 text-xs text-muted-foreground">
+                Copy didn&apos;t work automatically — select the text above and copy it manually.
               </p>
-              <ol className="flex flex-col gap-1.5 text-sm text-muted-foreground">
+            )}
+
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-0.5">
+                <h3 className="text-sm font-semibold text-foreground">
+                  How to add it on {instructions.platformLabel}
+                </h3>
+                <p className="text-sm text-muted-foreground">{instructions.summary}</p>
+              </div>
+              <ol className="flex flex-col gap-2.5">
                 {instructions.steps.map((step, index) => (
-                  <li key={index} className="flex gap-2">
-                    <span className="text-foreground">{index + 1}.</span>
-                    <span>{step}</span>
+                  <li key={index} className="flex gap-3 text-sm text-foreground">
+                    <span
+                      aria-hidden
+                      className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-semibold tabular-nums text-muted-foreground"
+                    >
+                      {index + 1}
+                    </span>
+                    <span className="pt-px">{step}</span>
                   </li>
                 ))}
               </ol>
-              {instructions.notes.length > 0 && (
-                <ul className="mt-1 flex flex-col gap-1 text-xs text-muted-foreground">
-                  {instructions.notes.map((note, index) => (
-                    <li key={index}>{note}</li>
-                  ))}
-                </ul>
-              )}
+              <ul className="flex flex-col gap-1.5 rounded-2xl bg-muted/40 px-3.5 py-3 text-xs leading-relaxed text-muted-foreground">
+                {instructions.notes.map((note, index) => (
+                  <li key={index}>{note}</li>
+                ))}
+                {/* Every platform needs this; the custom-site notes already say it. */}
+                {!instructions.notes.some((note) => note.includes("data-wmf-config")) && (
+                  <li>
+                    Install the script once. When you generate a new configuration later, update{" "}
+                    <code className="font-mono text-foreground">data-wmf-config</code> to the new
+                    version and republish.
+                  </li>
+                )}
+              </ul>
               {instructions.docsUrl && (
                 <a
                   href={instructions.docsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-primary underline underline-offset-3"
+                  className="inline-flex items-center gap-1 self-start text-xs font-medium text-foreground underline underline-offset-3"
                 >
-                  Platform documentation
+                  {instructions.platformLabel} help article
+                  <ArrowUpRightIcon aria-hidden className="size-3.5" />
+                  <span className="sr-only">(opens in a new tab)</span>
                 </a>
               )}
             </div>

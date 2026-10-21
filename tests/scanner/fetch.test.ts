@@ -120,8 +120,10 @@ describe("fetchHtml — SSRF gate", () => {
 
   it("refuses non-http schemes and credentialed URLs", async () => {
     await expect(fetchHtml("file:///etc/passwd", LIMITS)).rejects.toBeInstanceOf(AppError);
+    // Still refused; reported as a fixable input ("remove the username and
+    // password") rather than as a hostile target.
     await expect(fetchHtml("https://user:pw@example.com/", LIMITS)).rejects.toMatchObject({
-      code: "BLOCKED_TARGET",
+      code: "INVALID_URL",
     });
   });
 

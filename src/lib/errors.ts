@@ -9,6 +9,7 @@
 export const ERROR_CODES = [
   "INVALID_URL",
   "BLOCKED_TARGET",
+  "HOST_NOT_FOUND",
   "FETCH_TIMEOUT",
   "FETCH_FAILED",
   "NOT_HTML",
@@ -41,6 +42,7 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   INVALID_URL: 400,
   BLOCKED_TARGET: 400,
+  HOST_NOT_FOUND: 400,
   FETCH_TIMEOUT: 504,
   FETCH_FAILED: 502,
   NOT_HTML: 415,

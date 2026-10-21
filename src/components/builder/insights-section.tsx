@@ -120,12 +120,13 @@ export function InsightsSection() {
   if (!state.siteId) return null;
 
   return (
-    <Accordion className="rounded-xl border border-border bg-card">
+    <Accordion className="rounded-4xl border border-border bg-card/60">
       <AccordionItem value="insights" className="border-none">
         <AccordionTrigger className="px-5 text-sm">
           <span className="flex items-center gap-2">
             <Activity aria-hidden className="size-4 text-muted-foreground" />
-            Insights
+            Activity &amp; diagnostics
+            <span className="hidden font-normal text-muted-foreground sm:inline">· your own activity, no visitor data</span>
           </span>
         </AccordionTrigger>
         <AccordionContent className="px-5 pb-5">

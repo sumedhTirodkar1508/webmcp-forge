@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Radio, Send, ShieldCheck, TriangleAlert } from "lucide-react";
 
 import { useBuilder } from "@/components/builder/builder-provider";
+import { stepStateFor } from "@/components/builder/progress";
+import { SectionError } from "@/components/builder/section-error";
 import { StepShell } from "@/components/builder/step-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -75,20 +77,23 @@ export function AskAgentSection() {
 
   return (
     <StepShell
-      step={6}
-      title="Ask your agent"
-      subtitle="Ask about your setup, or ask a real question and run it against your live site."
+      step={5}
+      id="step-test"
+      title="Try it like an agent would"
+      subtitle="Optional. Ask about your setup, or connect your live site and ask a real visitor question."
       status={locked ? "locked" : "active"}
-      lockedHint="Generate your installation snippet first."
+      current={stepStateFor(state, "test") === "current"}
+      lockedHint="Generate your snippet first."
       highlighted={false}
     >
       <div className="flex flex-col gap-5">
+        <SectionError sections={["ask"]} />
         {/* Live target status */}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-muted/40 px-3.5 py-3">
           <div className="flex items-center gap-2 text-sm">
             {liveTest.connected ? (
               <>
-                <Radio aria-hidden className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <Radio aria-hidden className="size-4 text-success" />
                 <span className="font-medium text-foreground">Live target connected</span>
                 <Badge variant="secondary">{liveTest.availableTools.length} tools visible</Badge>
               </>
@@ -102,9 +107,9 @@ export function AskAgentSection() {
             )}
           </div>
 
-          {liveTest.connected ? (
+          {liveTest.connected || liveTest.starting ? (
             <Button variant="outline" size="sm" onClick={() => void stopLiveTest()}>
-              End live test
+              {liveTest.starting ? "Cancel live test" : "End live test"}
             </Button>
           ) : (
             <Button
@@ -133,14 +138,27 @@ export function AskAgentSection() {
               : ""}
         </p>
 
+        {liveTest.starting && liveTest.testUrl && (
+          <p className="text-xs text-muted-foreground">
+            Keep your portfolio tab open while it connects. No new tab?{" "}
+            <a href={liveTest.testUrl} target="_blank" rel="noopener noreferrer"
+              className="font-medium text-foreground underline underline-offset-3">
+              Open your site to connect<span className="sr-only"> (opens in a new tab)</span>
+            </a>
+          </p>
+        )}
+
         {/* Transcript */}
         {chat.length > 0 && (
           <ol className="flex flex-col gap-4">
             {chat.map((turn) => (
               <li key={turn.id} className="flex flex-col gap-2">
-                <p className="text-sm font-medium text-foreground break-words">{turn.question}</p>
+                <p className="max-w-[85%] self-end rounded-2xl rounded-br-md bg-primary px-3.5 py-2 text-sm break-words text-primary-foreground">
+                  <span className="sr-only">You asked: </span>
+                  {turn.question}
+                </p>
 
-                <div className="rounded-lg border border-border bg-card p-3">
+                <div className="max-w-[92%] self-start rounded-2xl rounded-bl-md border border-border bg-card px-3.5 py-3">
                   {turn.pending ? (
                     <p className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Loader2 aria-hidden className="size-4 animate-spin" />
@@ -176,8 +194,11 @@ export function AskAgentSection() {
                 </div>
               </li>
             ))}
-            <div ref={transcriptEnd} />
+
           </ol>
+        )}
+        {chat.length > 0 && (
+          <div ref={transcriptEnd} />
         )}
 
         <p aria-live="polite" className="sr-only">
@@ -196,6 +217,7 @@ export function AskAgentSection() {
           <div className="flex gap-2">
             <Input
               id="ask-agent-input"
+              className="h-10"
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
               placeholder={
@@ -205,7 +227,11 @@ export function AskAgentSection() {
               disabled={locked || busy || exhausted}
               aria-describedby="ask-agent-quota"
             />
-            <Button type="submit" disabled={locked || busy || exhausted || !question.trim()}>
+            <Button
+              type="submit"
+              size="icon-lg"
+              disabled={locked || busy || exhausted || !question.trim()}
+            >
               {busy ? (
                 <Loader2 aria-hidden className="size-4 animate-spin" />
               ) : (

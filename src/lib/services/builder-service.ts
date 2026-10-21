@@ -2,6 +2,7 @@ import "server-only";
 
 import type { BuilderSession, Site } from "@/generated/prisma/client";
 import { appOrigin, getEnv } from "@/lib/env";
+import { runtimeConfigSchema } from "@/lib/runtime-config";
 import { prisma } from "@/lib/prisma";
 import type { PlatformFingerprint, PlatformId } from "@/lib/scanner/types";
 import {
@@ -51,6 +52,26 @@ function detectedInstalledVersion(
   return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
 }
 
+/** Reads the snippet the scanner found, and whether it belongs to this site. */
+function readInstalledSnippet(
+  deterministic: Record<string, unknown>,
+  publicId: string,
+): DiscoverySummary["installedSnippet"] {
+  const raw = deterministic.installedSnippet as
+    | { siteId?: unknown; configVersion?: unknown }
+    | null
+    | undefined;
+  if (!raw || typeof raw.siteId !== "string" || !raw.siteId) return null;
+
+  const version = raw.configVersion;
+  return {
+    siteId: raw.siteId,
+    configVersion:
+      typeof version === "number" && Number.isInteger(version) && version >= 1 ? version : null,
+    matchesThisSite: raw.siteId === publicId,
+  };
+}
+
 const SECTION_LABELS: Record<string, string> = {
   profile: "About you",
   projects: "Projects",
@@ -58,11 +79,13 @@ const SECTION_LABELS: Record<string, string> = {
   experience: "Experience",
   education: "Education",
   contact: "Contact details",
-  navigation: "Navigation",
+  // What an owner calls it; "Navigation" read as an abstract category.
+  navigation: "Menu links",
 };
 
 function summariseDiscovery(
   scan: Awaited<ReturnType<typeof getLatestScan>>,
+  publicId: string,
 ): DiscoverySummary | null {
   if (
     !scan ||
@@ -116,6 +139,7 @@ function summariseDiscovery(
     aiModel: scan.semanticModel,
     aiFellBack: scan.semanticFellBack,
     scannedAt: scan.finishedAt?.toISOString() ?? scan.startedAt.toISOString(),
+    installedSnippet: readInstalledSnippet(deterministic, publicId),
   };
 }
 
@@ -139,10 +163,16 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
   const latestVersion = await prisma.configVersion.findFirst({
     where: { siteId: site.id },
     orderBy: { version: "desc" },
-    select: { version: true, publishedAt: true, createdAt: true },
+    select: { version: true, publishedAt: true, createdAt: true, runtimeConfig: true },
   });
 
   const origin = appOrigin();
+  const capabilities = current ? describeCapabilities(current.mapping, current.settings) : [];
+  const generated = runtimeConfigSchema.safeParse(latestVersion?.runtimeConfig);
+  const enabled = capabilities.filter((capability) => capability.enabled).map((capability) => capability.id);
+  const settingsChanged = latestVersion !== null && (!generated.success ||
+    enabled.length !== generated.data.enabledCapabilities.length ||
+    enabled.some((id) => !generated.data.enabledCapabilities.includes(id)));
 
   return {
     siteId: site.id,
@@ -151,8 +181,8 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
     origin: site.origin,
     title: site.title,
     status: site.status,
-    discovery: summariseDiscovery(scan),
-    capabilities: current ? describeCapabilities(current.mapping, current.settings) : [],
+    discovery: summariseDiscovery(scan, site.publicId),
+    capabilities,
     installation: latestVersion
       ? {
           publicId: site.publicId,
@@ -164,7 +194,7 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
           latestGeneratedVersion: latestVersion.version,
           generatedAt: (latestVersion.publishedAt ?? latestVersion.createdAt).toISOString(),
           installedVersion: detectedInstalledVersion(scan, site.publicId),
-          needsRegeneration: Boolean(
+          needsRegeneration: settingsChanged || Boolean(
             scan?.finishedAt &&
               (scan.status === "SUCCEEDED" || scan.status === "PARTIAL") &&
               scan.finishedAt > (latestVersion.publishedAt ?? latestVersion.createdAt),
@@ -177,6 +207,22 @@ export async function buildStateForSite(site: Site): Promise<BuilderState> {
 }
 
 /** The state for the session's current site, or an empty state. */
+/**
+ * The state to show when the builder page loads: the site this browser was
+ * last working on (remembered by id), falling back to the newest site this
+ * session created.
+ */
+export async function getInitialBuilderState(
+  session: BuilderSession,
+  rememberedSiteId: string | null,
+): Promise<BuilderState> {
+  if (rememberedSiteId) {
+    const remembered = await getBuilderState(session, rememberedSiteId);
+    if (remembered.siteId) return remembered;
+  }
+  return getBuilderState(session);
+}
+
 export async function getBuilderState(
   session: BuilderSession,
   siteId?: string,

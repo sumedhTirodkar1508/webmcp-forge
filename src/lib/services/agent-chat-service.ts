@@ -43,6 +43,16 @@ import { requireOwnedSiteFor } from "@/lib/session";
 
 const MAX_QUESTION_CHARS = 300;
 
+/**
+ * Wall-clock budgets for the interactive path.
+ *
+ * Someone is watching a chat box. Each model step gets a bounded slice, so the
+ * worst case — every fallback slow — still answers (or fails honestly) well
+ * inside the request rather than hanging until the platform kills it.
+ */
+const ROUTE_BUDGET_MS = 20_000;
+const SUMMARY_BUDGET_MS = 15_000;
+
 /** Bound what a real tool result may contribute to a prompt. */
 const MAX_TOOL_RESULT_CHARS = 6000;
 
@@ -216,6 +226,7 @@ export async function askAgent(
     timeoutMs: env.GEMINI_NL_DEMO_TIMEOUT_MS,
     maxRetriesPerModel: 1,
     onAttempt: recordAttempt("route"),
+    budgetMs: ROUTE_BUDGET_MS,
     call: async (model, signal) => {
       const response = await client.models.generateContent({
         model,
@@ -346,6 +357,7 @@ export async function askAgent(
     timeoutMs: env.GEMINI_NL_DEMO_TIMEOUT_MS,
     maxRetriesPerModel: 1,
     onAttempt: recordAttempt("summarize"),
+    budgetMs: SUMMARY_BUDGET_MS,
     call: async (model, signal) => {
       const response = await client.models.generateContent({
         model,

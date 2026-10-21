@@ -3,6 +3,7 @@ import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { Agent, request as undiciRequest } from "undici";
 
 import { AppError } from "@/lib/errors";
+import { urlRejectionError } from "@/lib/scanner/url-errors";
 import { isBlockedIp, normalizeUrl, assertSafeUrlSyntax } from "@/lib/scanner/url-safety";
 
 /**
@@ -167,10 +168,7 @@ export async function fetchHtml(
     for (let hop = 0; hop <= limits.maxRedirects; hop += 1) {
       const safety = assertSafeUrlSyntax(current);
       if (!safety.ok || !safety.url) {
-        throw new AppError(
-          safety.reason === "invalid_url" ? "INVALID_URL" : "BLOCKED_TARGET",
-          safety.message ?? "That address cannot be scanned.",
-        );
+        throw urlRejectionError(safety.reason);
       }
 
       const target = safety.url;
@@ -286,6 +284,16 @@ export function translateTransportError(error: unknown, url: string): AppError {
     code === "UND_ERR_CONNECT_TIMEOUT"
   ) {
     return new AppError("FETCH_TIMEOUT", "That site took too long to respond.", { url });
+  }
+
+  // The name stopped resolving between validation and connection, or never
+  // resolved for this resolver. Same advice as a typo, not a security block.
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+    return new AppError(
+      "HOST_NOT_FOUND",
+      "We couldn't find that website. Check the address for typos, and make sure the site is published.",
+      { url },
+    );
   }
 
   return new AppError("FETCH_FAILED", "We could not reach that address.", { url });

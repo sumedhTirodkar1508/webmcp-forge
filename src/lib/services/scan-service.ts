@@ -84,6 +84,7 @@ export async function scanSite(
       timeoutMs: env.SCAN_REQUEST_TIMEOUT_MS,
       maxBytes: env.SCAN_MAX_HTML_BYTES,
       maxRedirects: env.SCAN_MAX_REDIRECTS,
+      budgetMs: env.SCAN_TIME_BUDGET_MS,
     });
 
     const semantic = await interpretScan(crawl.representation, {
@@ -94,6 +95,13 @@ export async function scanSite(
     if (crawl.representation.lowInformation) {
       warnings.unshift(
         "This site appears to render significant content in the browser. WebMCP Forge could only inspect the HTML your server returned, so some sections may be missing.",
+      );
+    }
+    if (crawl.budgetExhausted) {
+      warnings.push(
+        `Your site responded slowly, so we read the ${crawl.pages.length} most important ` +
+          `page${crawl.pages.length === 1 ? "" : "s"} rather than waiting for all of them. ` +
+          "Scanning again later may find more.",
       );
     }
     for (const failure of crawl.failures.slice(0, 3)) {

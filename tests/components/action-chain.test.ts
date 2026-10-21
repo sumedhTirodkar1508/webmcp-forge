@@ -40,6 +40,7 @@ function stateFor(siteId: string, url: string, skills: number): BuilderState {
       aiModel: "gemini-3.5-flash-lite",
       aiFellBack: false,
       scannedAt: new Date().toISOString(),
+      installedSnippet: null,
     },
   };
 }

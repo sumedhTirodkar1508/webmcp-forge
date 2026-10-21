@@ -29,9 +29,7 @@ export default async function BuilderPage() {
         id="main"
         className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-4 pb-16 pt-10 sm:px-6 sm:pt-14"
       >
-        {/* An owner coming back to a site they've already scanned doesn't need
-            the pitch again — just a reminder of where they are. */}
-        <ForgeHero compact={state.discovery !== null} />
+        <ForgeHero />
 
         <div className="flex flex-col gap-6">
           <ProgressStepper />

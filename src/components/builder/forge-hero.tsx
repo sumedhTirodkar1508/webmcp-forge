@@ -1,50 +1,13 @@
-import { MousePointerClickIcon, ScanSearchIcon, SlidersHorizontalIcon } from "lucide-react";
+import { HowItWorks } from "@/components/builder/how-it-works";
 
 /**
  * The first thing an owner sees.
  *
  * The audience is designers, not engineers: this explains the idea in plain
- * terms and shows the whole journey up front, so the steps below read as a
- * short path rather than an open-ended form.
- *
- * `compact` is for an owner returning to a site they've already scanned — they
- * have read the pitch, and the steps below are what they came back for.
- *
- * Static and server-rendered: nothing here depends on live builder state.
+ * terms. The headline block is identical on every visit; only the step
+ * overview beneath it (<HowItWorks>) gives way once there is progress to show.
  */
-
-const STEPS = [
-  {
-    icon: ScanSearchIcon,
-    title: "Scan your site",
-    body: "We read your public pages and find your projects, skills and contact details.",
-  },
-  {
-    icon: SlidersHorizontalIcon,
-    title: "Choose what agents can do",
-    body: "Pick what agents may read or do. Nothing on your site changes yet.",
-  },
-  {
-    icon: MousePointerClickIcon,
-    title: "Paste one script tag",
-    body: "Add it to your site's custom code, publish, and we'll confirm it works.",
-  },
-] as const;
-
-export function ForgeHero({ compact = false }: { compact?: boolean }) {
-  if (compact) {
-    return (
-      <div className="flex flex-col gap-1.5">
-        <h1 className="text-balance text-2xl font-semibold tracking-tight text-foreground">
-          Make your portfolio agent-ready
-        </h1>
-        <p className="text-pretty text-sm text-muted-foreground">
-          Pick up where you left off — your progress is saved in this browser.
-        </p>
-      </div>
-    );
-  }
-
+export function ForgeHero() {
   return (
     <div className="relative isolate flex flex-col items-center gap-6 text-center">
       {/* A soft ember glow behind the headline; decorative only. */}
@@ -69,33 +32,7 @@ export function ForgeHero({ compact = false }: { compact?: boolean }) {
         </p>
       </div>
 
-      <ol className="grid w-full gap-3 text-left sm:grid-cols-3" aria-label="How it works">
-        {STEPS.map((step, index) => (
-          <li
-            key={step.title}
-            className="flex gap-3 rounded-2xl border border-border bg-card p-4 shadow-xs sm:flex-col sm:gap-3"
-          >
-            <span className="flex items-center gap-2">
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand">
-                <step.icon aria-hidden className="size-4" />
-              </span>
-              <span
-                aria-hidden
-                className="hidden text-xs font-medium tabular-nums text-muted-foreground sm:inline"
-              >
-                0{index + 1}
-              </span>
-            </span>
-            <span className="flex flex-col gap-1">
-              <span className="text-sm font-semibold text-foreground">
-                <span className="sr-only">Step {index + 1}: </span>
-                {step.title}
-              </span>
-              <span className="text-xs leading-relaxed text-muted-foreground">{step.body}</span>
-            </span>
-          </li>
-        ))}
-      </ol>
+      <HowItWorks />
     </div>
   );
 }

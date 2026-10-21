@@ -160,7 +160,11 @@ export function ScanResults() {
                 {discovery.scannedAt && (
                   <div>
                     <p className="font-medium text-foreground">Scanned at</p>
-                    <p className="mt-1">{new Date(discovery.scannedAt).toLocaleString()}</p>
+                    {/* Formatted in the viewer's locale and time zone, which the server can't
+                        know — so the server and browser renders legitimately differ. */}
+                    <p className="mt-1" suppressHydrationWarning>
+                      {new Date(discovery.scannedAt).toLocaleString()}
+                    </p>
                   </div>
                 )}
               </AccordionContent>

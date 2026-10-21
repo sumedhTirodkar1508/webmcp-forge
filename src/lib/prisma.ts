@@ -8,7 +8,7 @@ import { getEnv } from "@/lib/env";
 /**
  * Application-runtime Prisma client.
  *
- * Uses the PostgreSQL driver adapter against DATABASE_URL (the pooled Supabase
+ * Uses the PostgreSQL driver adapter against DATABASE_URL (the pooled hosted-Postgres
  * connection). Migrations deliberately use a different, session-mode connection
  * — see `prisma.config.ts`.
  *

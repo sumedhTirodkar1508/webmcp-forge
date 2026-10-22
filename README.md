@@ -270,15 +270,17 @@ The scanner fetches arbitrary user-supplied URLs from a trusted server, which is
 
 Nothing fetched is ever executed. It is only parsed as text.
 
-### Anonymous ownership
+### Sites, sessions and what protects a live site
 
-No signup. The first operation that needs an owner mints a 256-bit random bearer token, hands the **raw token to the browser in an HttpOnly cookie**, and stores **only its SHA-256 digest**.
+No signup. A website has exactly **one Forge site, keyed on its origin**, with a permanent public id — re-scanning, clearing cookies or switching browsers always resolves to the same site, so an installed snippet never goes stale.
 
-- The browser can never read it from JavaScript. It is never in `localStorage`.
-- A database dump yields nothing replayable.
-- `SameSite=Lax`, `Secure` in production, sliding 30-day expiry.
-- Every private operation re-checks ownership server-side. A site id from the browser is never trusted.
-- "Not found" and "not yours" return **identical** responses, so a stranger cannot probe which site ids exist.
+There is deliberately no owner. Anyone can scan a public website, and anyone can generate a new configuration for it. What protects a live site is **version pinning**: a website runs exactly the configuration version its own snippet names in `data-wmf-config`. Generating v3 changes nothing until the person who controls the website edits that attribute and republishes — deployment access is the real boundary.
+
+Each browser gets an anonymous session: a 256-bit random bearer token in an **HttpOnly cookie**, of which the database stores **only the SHA-256 digest** (so a dump yields nothing replayable). `SameSite=Lax`, `Secure` in production, sliding 30-day expiry. The session grants nothing over a site; it scopes the things that belong to one visitor:
+
+- **Live agent tests.** A test connects one person's real browser tab to Forge, so only the session that started it can send it commands, see that it is connected, or end it — another visitor working on the same site cannot.
+- **The hourly scan limit**, counted by the session that started each scan.
+- **Where you left off.** The page reopens the last site this browser worked on.
 
 An unsalted digest is right here: unlike a password, the token is 256 bits of uniform randomness, so there is no dictionary to run.
 
@@ -296,23 +298,23 @@ The browser never queries the database directly. The public payload is built **f
 
 - **CORS** — narrowly scoped. Each public response echoes the *one* origin that site was published for, never `*`, with `Vary: Origin`. Credentials are never allowed.
 - **CSRF** — `SameSite=Lax` plus an explicit `Origin` check on every mutating route.
-- **Cost abuse** — anonymous endpoints that spend Gemini quota are capped per session per hour, and the natural-language demo's limit is enforced against a database ledger, not a browser counter.
+- **Cost abuse** — three layers, all enforced in the database rather than the browser: scans per session per hour (`SCAN_MAX_PER_SESSION_PER_HOUR`), questions per portfolio (`GEMINI_NL_DEMO_MAX_QUESTIONS`), and a deployment-wide ceiling on Gemini requests per rolling 24 hours (`AI_GLOBAL_DAILY_LIMIT`) — the one that still holds when someone clears cookies. The per-session and per-portfolio checks hold a transaction-scoped advisory lock while they count and reserve, so parallel requests cannot all slip under a limit. Past the daily ceiling, scans fall back to the structural reading and the assistant pauses.
 - **Untrusted content** — everything extracted from a third-party page is treated as data and flagged `untrustedContentHint`.
-- **Errors** — a stable code taxonomy; unexpected failures collapse to `INTERNAL`. No stack trace ever reaches a user.
+- **Errors** — a stable code taxonomy; unexpected failures collapse to `INTERNAL`. An unreachable database (a serverless database waking up, say) is reported as `DATABASE_UNAVAILABLE` with a 503 and a "try again in a few seconds" message, and the builder page still renders with a notice instead of failing. No stack trace ever reaches a user.
 - **Logging** — structured, with key-based redaction of anything matching key/token/secret/password/challenge.
 
 ---
 
-## Why Supabase but not Supabase
+## The database is just Postgres
 
-Supabase is used **purely as hosted Postgres**. Deliberately not used:
+Forge uses **plain PostgreSQL** through Prisma and the `pg` driver adapter. The hosted deployment runs on [Neon](https://neon.tech) (it moved from Supabase without a code change); any Postgres 16+ works. Deliberately not used:
 
-- ❌ Supabase Auth — ownership is our own anonymous session model
-- ❌ the Supabase Data API — no PostgREST
-- ❌ browser-side `supabase-js` — the browser never touches the database
-- ❌ RLS as the security boundary — authorisation is explicit server-side checks
+- ❌ a hosted auth product — sessions are our own anonymous model
+- ❌ a database HTTP/data API — no PostgREST or equivalent
+- ❌ a browser-side database client — the browser never touches the database
+- ❌ row-level security as the security boundary — authorisation is explicit server-side code
 
-So none of `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_ANON_KEY` or `SUPABASE_SERVICE_ROLE_KEY` is required. All database access is trusted server code, and **no database credential ever reaches the browser**.
+So the only database settings are `DATABASE_URL` (pooled, used at runtime) and `DIRECT_URL` (direct, used for migrations). All database access is trusted server code, and **no database credential ever reaches the browser**. Building does not need them either: `prisma generate` runs without a database URL, so CI and preview builds compile even without secrets.
 
 ---
 
@@ -369,11 +371,15 @@ Every variable is server-only. None is `NEXT_PUBLIC_`. See `.env.example` for th
 | `DIRECT_URL` | migrations (session mode) |
 | `GEMINI_API_KEY` | optional; without it, scans use the heuristic mapping |
 | `GEMINI_SEMANTIC_*_MODEL` | the model chain |
-| `GEMINI_NL_DEMO_MODEL`, `GEMINI_NL_DEMO_MAX_QUESTIONS` | the demo and its hard cap |
+| `GEMINI_NL_DEMO_MODEL`, `GEMINI_NL_DEMO_MAX_QUESTIONS` | the demo and its per-portfolio question cap (alias `NATURAL_LANGUAGE_DEMO_LIMIT`) |
+| `AI_GLOBAL_DAILY_LIMIT` | Gemini requests allowed per rolling 24 hours across all visitors (default 600; `0` = off) |
 | `APP_BASE_URL` | the origin the installation snippet points at |
+| `DEMO_PORTFOLIO_URL` | the portfolio behind the "Try the demo" button (empty hides it) |
 | `SCAN_MAX_PAGES`, `SCAN_REQUEST_TIMEOUT_MS`, `SCAN_MAX_HTML_BYTES`, `SCAN_MAX_REDIRECTS` | scanner bounds |
+| `SCAN_TIME_BUDGET_MS`, `SCAN_AI_BUDGET_MS` | wall-clock budgets for crawling and for the AI step |
 | `SCAN_MAX_PER_SESSION_PER_HOUR` | anti-abuse |
 | `VERIFICATION_CHALLENGE_TTL_SECONDS` | challenge lifetime |
+| `TEST_DATABASE_URL` | tests only: a throwaway database the integration suites may write to |
 
 Older variable names (`NEXT_PUBLIC_APP_URL`, `GEMINI_PRIMARY_MODEL`, …) are still accepted as documented aliases; the canonical name always wins.
 
@@ -394,11 +400,15 @@ pnpm db:generate
 pnpm db:studio
 ```
 
-Migrations are version-controlled under `prisma/migrations`. `prisma db push` is **not** the migration strategy, and application DDL is never pasted into the Supabase SQL editor.
+Migrations are version-controlled under `prisma/migrations`. `prisma db push` is **not** the migration strategy, and application DDL is never pasted into a provider's SQL console. Schema changes are additive where possible so they can be applied before the code that uses them is deployed.
 
 ### Tests
 
-Unit suites run anywhere. The integration suites — anonymous ownership, verification replay, the public/private boundary — run against the real database and **skip cleanly** when `DATABASE_URL` is absent, so a checkout without secrets still passes.
+Unit suites run anywhere. The integration suites — site identity, verification replay, the public/private boundary, live-test isolation, quotas under concurrency — run against a real Postgres, and **only** when `TEST_DATABASE_URL` names a throwaway database. They never activate on `DATABASE_URL`, so `pnpm test` can't write to the application database; without `TEST_DATABASE_URL` they skip cleanly. CI points them at its own ephemeral Postgres container, so they run on every pull request.
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/forge_test pnpm test
+```
 
 They use a real database on purpose: the thing under test is that a query scoped to one session cannot reach another session's row, and a stubbed Prisma would only prove the stub agrees with itself.
 
@@ -416,34 +426,30 @@ tool call is a real agent-path test.
 
 ## Deploying
 
-Vercel, with these environment variables set in the project:
+Vercel, with these environment variables set for **both Production and Preview** (a preview deployment without the database variables builds, but cannot serve the builder):
 
 ```
-DATABASE_URL
-DIRECT_URL
+DATABASE_URL          ← pooled connection
+DIRECT_URL            ← direct connection
 GEMINI_API_KEY
-GEMINI_SEMANTIC_PRIMARY_MODEL
-GEMINI_SEMANTIC_FALLBACK_1_MODEL
-GEMINI_SEMANTIC_FALLBACK_2_MODEL
-GEMINI_NL_DEMO_MODEL
-GEMINI_NL_DEMO_MAX_QUESTIONS
 APP_BASE_URL          ← the deployed https:// origin, not localhost
-SCAN_MAX_PAGES
-VERIFICATION_CHALLENGE_TTL_SECONDS
 ```
 
-Apply migrations against the production database:
+Everything else has a sensible default; see `.env.example`.
+
+When a release includes a migration, apply it **before** deploying the code that uses it:
 
 ```bash
-DIRECT_URL="postgresql://…" pnpm db:migrate:deploy
+pnpm db:migrate:deploy        # with DIRECT_URL pointing at production
 ```
 
 `pnpm build` bundles the runtime and generates the Prisma client, so no extra build step is needed.
 
 The full production and separate-demo setup is in
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). CI runs dependency installation,
-Prisma validation/generation, type-checking, linting, tests, and the production
-build on every push and pull request.
+Prisma validation/generation, migrations against a fresh database, type-checking,
+linting, the full test suite (including the database integration suites), and
+the production build on every push and pull request.
 
 ---
 
@@ -463,9 +469,9 @@ A headless browser would paper over this at the cost of a heavyweight production
 
 - The runtime exposes `window.__webmcpForge.invokeViaWebMcp(name, input)`, which goes through the browser's real WebMCP machinery on the portfolio page. **That is genuine agent-path invocation.**
 - It also exposes `invokeHandlerDirectly(name, input)`, which calls the handler directly. **That is a diagnostic, not WebMCP**, and is named so it cannot be mistaken for one.
-- The natural-language demo returns *which tool an agent would call and with what arguments*. It does not fabricate a result.
+- The natural-language demo answers setup questions from verification data. A question about the portfolio's content runs for real only through the live agent test, which opens the portfolio in your own tab and relays the call into it; with no live test connected it says which tool would run, and never fabricates a result.
 
-**Anonymous sessions.** Clearing cookies loses access to a site's configuration. Accounts are roadmap.
+**Anonymous sessions.** There are no accounts, so nobody "owns" a site in Forge: anyone can scan a public website and generate a configuration for it. Your live site is protected by version pinning, not by Forge. Clearing cookies loses only where you left off and any live test in progress. Accounts and verified ownership are roadmap.
 
 ---
 

@@ -401,6 +401,10 @@ enum AiAttemptStatus {
   SCHEMA_INVALID
   TIMEOUT
   UNKNOWN_ERROR
+  /// Not a model request: a question slot held while one is being answered, so
+  /// concurrent questions cannot all pass the per-site limit at once. Deleted
+  /// when the question finishes; ignored after a short TTL if a request dies.
+  RESERVED
 
   @@map("ai_attempt_status")
 }
@@ -430,6 +434,8 @@ model AiUsageEvent {
 
   @@index([siteId, purpose, createdAt])
   @@index([scanRunId])
+  /// The deployment-wide AI budget counts every row in a rolling 24 hours.
+  @@index([createdAt])
   @@map("ai_usage_events")
 }
 

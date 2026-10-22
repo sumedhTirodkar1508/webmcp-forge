@@ -39,7 +39,11 @@ export async function getAiBudget(now: Date = new Date()): Promise<AiBudget> {
   if (limit === 0) return evaluateAiBudget(0, 0);
 
   const used = await prisma.aiUsageEvent.count({
-    where: { createdAt: { gte: new Date(now.getTime() - AI_BUDGET_WINDOW_MS) } },
+    where: {
+      createdAt: { gte: new Date(now.getTime() - AI_BUDGET_WINDOW_MS) },
+      // A held question slot is not a model request.
+      status: { not: "RESERVED" },
+    },
   });
   return evaluateAiBudget(limit, used);
 }

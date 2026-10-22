@@ -1,52 +1,115 @@
 # Deploy WebMCP Forge
 
+## Database
+
+Forge needs a PostgreSQL 16+ database and uses no vendor-specific features.
+The hosted deployment uses [Neon](https://neon.tech); any provider works.
+
+Two connection strings:
+
+| Variable | Use | Neon | Supabase |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | Runtime queries, through a pooler | the **pooled** string (host contains `-pooler`) | transaction pooler, port 6543 |
+| `DIRECT_URL` | Migrations (`prisma migrate`), which need a direct session | the **direct** string | session pooler, port 5432 |
+
+Use `sslmode=verify-full` rather than `require` in both: it is what the driver
+does today anyway, and it silences a deprecation warning on every connection.
+
+A serverless database that scales to zero (Neon's default) wakes on the first
+query after idling. The app waits up to 15 seconds for a connection; if the
+database still isn't reachable, requests get a `DATABASE_UNAVAILABLE` (503) with
+a "try again in a few seconds" message, and the builder page renders with a
+notice rather than failing.
+
+### Moving between providers
+
+The schema lives in `prisma/migrations`, so a move is a dump and restore:
+
+```bash
+pg_dump "$OLD_DIRECT_URL" --schema=public --no-owner --no-privileges --format=custom --file=forge.dump
+pg_restore --no-owner --no-privileges --dbname="$NEW_DIRECT_URL" forge.dump
+```
+
+Restore into an **empty** database, with a `pg_dump` at least as new as the old
+server. Restore the full dump rather than data only: `sites` and
+`config_versions` reference each other, which a data-only restore can't order,
+and the dump also carries the migration history, so `pnpm db:status` reports
+the new database as up to date. Compare row counts on both sides with:
+
+```bash
+node scripts/db-counts.mjs     # read-only; prints host and counts, never credentials
+```
+
+Preserving the rows keeps every site's public id and every configuration
+version, so snippets already installed on websites keep working.
+
 ## Forge application
 
-Deploy the repository to Vercel as a Next.js application. Set these production
-environment variables before deploying:
+Deploy the repository to Vercel as a Next.js application. Set these variables
+for **both Production and Preview**. A preview without the database variables
+still builds, but its builder can't load anything.
 
 | Variable | Value |
 | --- | --- |
-| `DATABASE_URL` | Postgres transaction-pooler connection, normally port 6543 |
-| `DIRECT_URL` | Direct Postgres connection, normally port 5432 |
-| `GEMINI_API_KEY` | Gemini API key used during scan setup |
-| `GEMINI_SEMANTIC_PRIMARY_MODEL` | Preferred semantic-mapping Gemini model |
-| `GEMINI_SEMANTIC_FALLBACK_1_MODEL`, `GEMINI_SEMANTIC_FALLBACK_2_MODEL` | Ordered semantic-mapping fallbacks |
-| `GEMINI_NL_DEMO_MODEL` | Model used by the optional natural-language demo |
-| `GEMINI_NL_DEMO_MAX_QUESTIONS` | Server-enforced demo-question limit |
-| `GEMINI_MAX_RETRIES_PER_MODEL`, `GEMINI_REQUEST_TIMEOUT_MS` | Bounded retry and per-model timeout controls |
+| `DATABASE_URL`, `DIRECT_URL` | See [Database](#database) |
+| `GEMINI_API_KEY` | Gemini API key used during scan setup and by the demo assistant |
 | `APP_BASE_URL` | Canonical deployed Forge origin, for example `https://forge.example.com` |
-| `SCAN_MAX_PAGES` | Bounded same-origin page budget (default `10`) |
-| `SCAN_REQUEST_TIMEOUT_MS` | Scanner request timeout in milliseconds |
+
+Optional, with defaults in `.env.example`:
+
+| Variable | Value |
+| --- | --- |
+| `GEMINI_SEMANTIC_PRIMARY_MODEL`, `GEMINI_SEMANTIC_FALLBACK_1_MODEL`, `GEMINI_SEMANTIC_FALLBACK_2_MODEL` | Semantic-mapping model chain |
+| `GEMINI_NL_DEMO_MODEL` | Model used by the demo assistant |
+| `GEMINI_NL_DEMO_MAX_QUESTIONS` | Questions allowed per portfolio |
+| `AI_GLOBAL_DAILY_LIMIT` | Gemini requests per rolling 24 hours across all visitors (default 600, `0` = off) |
+| `SCAN_MAX_PER_SESSION_PER_HOUR` | Scans one browser session may start per hour |
+| `SCAN_MAX_PAGES`, `SCAN_REQUEST_TIMEOUT_MS`, `SCAN_TIME_BUDGET_MS`, `SCAN_AI_BUDGET_MS` | Scanner bounds and time budgets |
+| `DEMO_PORTFOLIO_URL` | The "Try the demo" portfolio; empty hides the button |
 | `VERIFICATION_CHALLENGE_TTL_SECONDS` | Installation-check challenge lifetime |
 
-Do not set browser-exposed database or Gemini values. Supabase Auth credentials
-are not used by this application. Keep all production values in Vercel's
-encrypted environment settings; `.env.example` contains placeholders only.
+Do not set browser-exposed database or Gemini values. Keep all production
+values in Vercel's encrypted environment settings; `.env.example` contains
+placeholders only.
 
-Before the first production release, run migrations against the direct database
-connection:
+### Releasing a schema change
 
-```bash
-pnpm install --frozen-lockfile
-pnpm db:migrate:deploy
-```
+Migrations are additive where possible, so the order is:
 
-The build runs Prisma generation and creates the public runtime bundle. A
-successful deploy should serve `/runtime/v1.js` and the application routes from
-the same Forge origin.
+1. Apply the migration to production, from a machine whose `.env.local` (or
+   environment) has the production `DIRECT_URL`:
+
+   ```bash
+   pnpm db:status          # confirm it names the production host and shows the pending migration
+   pnpm db:migrate:deploy
+   ```
+
+2. Deploy (merge) the code that uses it.
+
+The currently deployed code keeps working in between, because it never reads
+the new columns. The build itself does not need database access: `prisma
+generate` runs without a database URL.
+
+A successful deploy serves `/runtime/v1.js` and the application routes from the
+same Forge origin.
 
 ## Demo portfolio
 
 `examples/demo-portfolio` is intentionally a separate static site. Create a
 second Vercel project with that directory as its Root Directory. Its
-`vercel.json` is self-contained; it has no dependencies and no Forge script.
-After it is deployed, paste its public URL into Forge for the contest demo.
+`vercel.json` is self-contained; it has no dependencies and no database. Set
+`DEMO_PORTFOLIO_URL` in Forge to its public URL so the "Try the demo" button
+points at it.
 
-## Ownership and verification notes
+## Sites, sessions and verification
 
-Anonymous ownership uses an HttpOnly browser cookie. A localhost owner session
-does not transfer to the production Forge origin, so create or claim the demo
-site again after moving from local development to production. Installation
-verification requires the published portfolio's HTTPS origin and a fresh,
-single-use challenge opened from the builder.
+A site is identified by its origin, not by a browser session, so the demo
+site (and its public id) is the same in every browser and survives clearing
+cookies. Nothing needs to be "claimed" after moving from local development to
+production — but a local database and the production database are separate,
+so a site scanned locally has a different public id from the same site scanned
+in production. Install the snippet generated by the Forge origin the website
+should talk to.
+
+Installation verification requires the published portfolio's HTTPS origin and
+a fresh, single-use challenge opened from the builder.

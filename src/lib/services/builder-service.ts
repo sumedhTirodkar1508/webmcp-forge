@@ -1,7 +1,8 @@
 import "server-only";
 
 import type { BuilderSession, Site } from "@/generated/prisma/client";
-import { appOrigin, getEnv } from "@/lib/env";
+import { questionsRemaining } from "@/lib/ai/question-quota";
+import { appOrigin } from "@/lib/env";
 import { runtimeConfigSchema } from "@/lib/runtime-config";
 import { prisma } from "@/lib/prisma";
 import type { PlatformFingerprint, PlatformId } from "@/lib/scanner/types";
@@ -143,13 +144,12 @@ function summariseDiscovery(
   };
 }
 
-/** Server-side count of natural-language demo questions already spent. */
+/**
+ * Server-side count of natural-language demo questions left. Uses the shared
+ * rule — this used to count summary rows too, so a live answer cost two.
+ */
 async function demoQuestionsRemaining(siteId: string): Promise<number> {
-  const limit = getEnv().GEMINI_NL_DEMO_MAX_QUESTIONS;
-  const used = await prisma.aiUsageEvent.count({
-    where: { siteId, purpose: "NL_DEMO", status: "SUCCESS" },
-  });
-  return Math.max(0, limit - used);
+  return questionsRemaining(siteId);
 }
 
 export async function buildStateForSite(site: Site): Promise<BuilderState> {

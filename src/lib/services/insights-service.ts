@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Site } from "@/generated/prisma/client";
+import { countQuestionsUsed } from "@/lib/ai/question-quota";
 import { getEnv } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { loadCurrentSettings, describeCapabilities } from "@/lib/services/config-service";
@@ -54,7 +55,8 @@ export interface InsightsSummary {
 }
 
 export async function buildInsights(site: Site): Promise<InsightsSummary> {
-  const [scanCount, lastScan, verificationCount, lastRun, aiRows, current] = await Promise.all([
+  const [scanCount, lastScan, verificationCount, lastRun, aiRows, current, questionsUsed] =
+    await Promise.all([
     prisma.scanRun.count({ where: { siteId: site.id } }),
     prisma.scanRun.findFirst({
       where: { siteId: site.id },
@@ -72,6 +74,9 @@ export async function buildInsights(site: Site): Promise<InsightsSummary> {
       select: { status: true, errorCode: true, model: true, latencyMs: true },
     }),
     loadCurrentSettings(site),
+    // Counted in the database, not from the 25-row sample above, which made
+    // this wrong once a portfolio had more than 25 AI rows.
+    countQuestionsUsed(site.id),
   ]);
 
   const mapping = current?.mapping;
@@ -93,11 +98,6 @@ export async function buildInsights(site: Site): Promise<InsightsSummary> {
   } | null;
   const size = (value: unknown) => (Array.isArray(value) ? value.length : 0);
 
-  // A question is one SUCCESS row with no errorCode; `summarize` rows belong to
-  // the same submission and retries were never successes.
-  const questionsUsed = aiRows.filter(
-    (row) => row.status === "SUCCESS" && row.errorCode === null,
-  ).length;
   const lastSuccess = aiRows.find((row) => row.status === "SUCCESS");
 
   const capabilities = current ? describeCapabilities(current.mapping, current.settings) : [];

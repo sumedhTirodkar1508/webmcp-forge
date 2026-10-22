@@ -1,5 +1,24 @@
 # Project review — October 20, 2026
 
+> **Status, October 21, 2026.** Both decisions below have been resolved:
+>
+> - **Visitor isolation.** Live agent tests are now tied to the browser session
+>   that started them: another visitor of the same site can't send them commands,
+>   see that they're connected, or end them. Drafts deliberately stay shared per
+>   site. The project's model is one site per origin with no owner, and an
+>   installed website is protected by pinning the configuration version it runs,
+>   so per-visitor workspaces were not added.
+> - **Concurrency.** Capability toggles are applied as single-key merges in the
+>   database, so simultaneous edits no longer overwrite each other. The scan limit
+>   and the per-portfolio question limit both count and reserve under a
+>   transaction-scoped advisory lock, so parallel requests can't slip past them,
+>   and the scan limit now counts the session that started each scan. A
+>   deployment-wide daily Gemini budget (`AI_GLOBAL_DAILY_LIMIT`) bounds total
+>   spend.
+>
+> Each fix has an integration test that was checked to fail without it, and those
+> suites now run in CI against its ephemeral Postgres.
+
 Reviewed the current working tree, including the substantial pre-existing changes. Those changes were preserved. The review covered the builder UI, site selection, capability generation, installation, verification polling, live testing, HTTP request handling, scanner safety, and configuration/session boundaries. This is a focused review, not a complete security audit.
 
 ## Implemented improvements

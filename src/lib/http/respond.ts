@@ -3,7 +3,7 @@ import "server-only";
 import { z } from "zod";
 
 import { appOrigin } from "@/lib/env";
-import { AppError, toAppError } from "@/lib/errors";
+import { AppError, summarizeDatabaseError, toAppError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
 
 /**
@@ -32,11 +32,17 @@ export function jsonError(error: unknown): Response {
     logger.error("unhandled_route_error", {
       message: error instanceof Error ? error.message : String(error),
     });
+  } else if (appError.code === "DATABASE_UNAVAILABLE") {
+    logger.warn("database_unavailable", { cause: summarizeDatabaseError(error) });
   }
 
   return Response.json(appError.toJSON(), {
     status: appError.status,
-    headers: { "cache-control": "no-store" },
+    headers: {
+      "cache-control": "no-store",
+      // A brief outage (a database waking up) is worth retrying shortly.
+      ...(appError.code === "DATABASE_UNAVAILABLE" ? { "retry-after": "5" } : {}),
+    },
   });
 }
 

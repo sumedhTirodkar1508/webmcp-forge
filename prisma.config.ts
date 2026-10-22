@@ -19,7 +19,17 @@ loadEnv({ override: false });
 
 const migrationUrl = process.env.DIRECT_URL ?? process.env.DATABASE_URL;
 
-if (!migrationUrl) {
+/**
+ * Only some commands talk to a database. `prisma generate` — run by every
+ * build — does not, so a build must not need database secrets: a Vercel
+ * preview missing its variables, CI, or a fork should still compile. This used
+ * to throw for every command, which is what turned a missing preview variable
+ * into a failed build.
+ */
+const DATABASE_COMMANDS = new Set(["migrate", "db", "studio", "introspect"]);
+const needsDatabase = process.argv.some((arg) => DATABASE_COMMANDS.has(arg));
+
+if (!migrationUrl && needsDatabase) {
   throw new Error(
     "Prisma CLI needs DIRECT_URL (preferred) or DATABASE_URL to be set. See .env.example.",
   );
@@ -30,7 +40,5 @@ export default defineConfig({
   migrations: {
     path: "prisma/migrations",
   },
-  datasource: {
-    url: migrationUrl,
-  },
+  ...(migrationUrl ? { datasource: { url: migrationUrl } } : {}),
 });

@@ -137,14 +137,29 @@ export async function setCapabilityEnabled(
     };
   }
 
-  const settings: CapabilitySettings = { ...current.settings, [capabilityId]: enabled };
-
   // Editing a toggle is not a deployment decision. It updates the working
   // draft; only an explicit generate action appends an immutable version.
-  await prisma.site.update({
-    where: { id: site.id },
-    data: { draftSettings: asJson(settings) },
-  });
+  //
+  // The change is applied in the database as a merge of this ONE key, not by
+  // writing back a whole settings object read a moment earlier. Two toggles
+  // landing together — two tabs, or an agent and a person — would otherwise
+  // each write their own snapshot and the second would silently undo the
+  // first. When no draft exists yet, the current settings (the scan's
+  // recommendation) become the starting point.
+  const rows = await prisma.$queryRaw<Array<{ draft_settings: unknown }>>`
+    UPDATE "sites"
+    SET "draft_settings" =
+          (CASE WHEN jsonb_typeof("draft_settings") = 'object'
+                THEN "draft_settings"
+                ELSE ${JSON.stringify(current.settings)}::jsonb
+           END) || jsonb_build_object(${capabilityId}::text, ${enabled}::boolean),
+        "updated_at" = now()
+    WHERE "id" = ${site.id}::uuid
+    RETURNING "draft_settings"`;
+
+  // Describe what is actually stored now, including any change that landed
+  // concurrently, rather than this request's own view of it.
+  const settings = normalizeSettings(rows[0]?.draft_settings, available);
 
   return {
     capabilities: describeCapabilities(current.mapping, settings),

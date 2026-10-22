@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Site } from "@/generated/prisma/client";
+import { countQuestionsUsed } from "@/lib/ai/question-quota";
 import { getEnv } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import { describeCapabilities, loadCurrentSettings } from "@/lib/services/config-service";
@@ -159,9 +160,7 @@ export async function buildReadinessSnapshot(
         orderBy: { createdAt: "desc" },
         select: { availableTools: true },
       }),
-      prisma.aiUsageEvent.count({
-        where: { siteId: site.id, purpose: "NL_DEMO", status: "SUCCESS", errorCode: null },
-      }),
+      countQuestionsUsed(site.id),
     ]);
 
   const capabilities = current ? describeCapabilities(current.mapping, current.settings) : [];

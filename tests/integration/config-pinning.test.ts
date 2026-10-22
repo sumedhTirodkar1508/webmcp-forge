@@ -137,6 +137,37 @@ describeDb("configuration pinning", () => {
     expect(JSON.stringify(reread.runtimeConfig)).toBe(beforeJson);
   });
 
+  it("concurrent toggles of different capabilities all stick", async () => {
+    const session = await newSession();
+    const site = await scannedSite(session);
+
+    // Every capability this scan can support, switched on at the same moment —
+    // two tabs, or an agent and a person, editing together.
+    const first = await setCapabilityEnabled(session, site.id, "list_projects", true);
+    const supported = first.capabilities.filter((c) => c.supported).map((c) => c.id);
+    expect(supported.length).toBeGreaterThan(1);
+
+    await Promise.all(supported.map((id) => setCapabilityEnabled(session, site.id, id, false)));
+
+    // None may be lost to another request writing back an older snapshot.
+    const { loadCurrentSettings } = await import("@/lib/services/config-service");
+    const reread = await prisma.site.findUniqueOrThrow({ where: { id: site.id } });
+    const current = await loadCurrentSettings(reread);
+    for (const id of supported) expect(current?.settings[id], id).toBe(false);
+  });
+
+  it("a toggle keeps the scan's recommendations as its starting point", async () => {
+    const session = await newSession();
+    const site = await scannedSite(session);
+
+    // No draft yet: the recommendation (list_projects on) is what's in force.
+    const result = await setCapabilityEnabled(session, site.id, "search_projects", true);
+
+    const byId = new Map(result.capabilities.map((c) => [c.id, c.enabled]));
+    expect(byId.get("search_projects")).toBe(true);
+    expect(byId.get("list_projects")).toBe(true);
+  });
+
   it("gives concurrent generations distinct versions", async () => {
     const session = await newSession();
     const site = await scannedSite(session);

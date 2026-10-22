@@ -4,8 +4,9 @@ import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 
 import { getAiBudget } from "@/lib/ai/budget";
+import { questionsRemaining, reserveQuestion } from "@/lib/ai/question-quota";
 import { runModelChain, type AiAttemptRecord } from "@/lib/ai/model-chain";
-import type { BuilderSession } from "@/generated/prisma/client";
+import type { BuilderSession, Site } from "@/generated/prisma/client";
 import { getEnv, hasGeminiKey } from "@/lib/env";
 import { AppError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
@@ -90,11 +91,6 @@ export interface AgentChatResult {
   questionsRemaining: number;
 }
 
-async function questionsUsed(siteId: string): Promise<number> {
-  return prisma.aiUsageEvent.count({
-    where: { siteId, purpose: "NL_DEMO", status: "SUCCESS", errorCode: null },
-  });
-}
 
 function nlModels(): string[] {
   const env = getEnv();
@@ -178,7 +174,6 @@ export async function askAgent(
   question: string,
 ): Promise<AgentChatResult> {
   const site = await requireOwnedSiteFor(session, siteId);
-  const env = getEnv();
 
   if (!hasGeminiKey()) {
     throw new AppError("AI_UNAVAILABLE", "The assistant is not configured on this deployment.");
@@ -190,16 +185,7 @@ export async function askAgent(
     throw new AppError("VALIDATION_FAILED", "That question is too long.");
   }
 
-  // Checked before anything is spent with the provider.
-  const used = await questionsUsed(site.id);
-  if (used >= env.GEMINI_NL_DEMO_MAX_QUESTIONS) {
-    throw new AppError(
-      "DEMO_LIMIT_REACHED",
-      `The assistant is limited to ${env.GEMINI_NL_DEMO_MAX_QUESTIONS} questions for this portfolio.`,
-    );
-  }
-
-  // The overall cap, separate from the per-site question limit above: that one
+  // The overall cap, separate from the per-site question limit below: that one
   // bounds a single portfolio, this one bounds the deployment's total spend.
   const budget = await getAiBudget();
   if (budget.exhausted) {
@@ -209,6 +195,22 @@ export async function askAgent(
     );
   }
 
+  // Checked — and the slot held — before anything is spent with the provider.
+  const reservation = await reserveQuestion(site.id);
+  try {
+    return await answerQuestion(session, site, trimmed);
+  } finally {
+    await reservation.release();
+  }
+}
+
+/** Routes and answers one question whose slot is already reserved. */
+async function answerQuestion(
+  session: BuilderSession,
+  site: Site,
+  trimmed: string,
+): Promise<AgentChatResult> {
+  const env = getEnv();
   const snapshot = await buildReadinessSnapshot(site, session.id);
   const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -303,8 +305,7 @@ export async function askAgent(
     );
   }
 
-  const remaining = async () =>
-    Math.max(0, env.GEMINI_NL_DEMO_MAX_QUESTIONS - (await questionsUsed(site.id)));
+  const remaining = () => questionsRemaining(site.id);
 
   // --- Mode A: readiness -------------------------------------------------
   if (!routed.value.needsLiveTool || !routed.value.tool) {

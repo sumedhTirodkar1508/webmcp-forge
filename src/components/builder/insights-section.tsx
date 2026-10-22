@@ -60,6 +60,35 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
+/**
+ * Readable names for the count keys and enum values the API returns. The panel
+ * used to print them raw ("skillGroups", "live skillGroups", "SUCCESS").
+ */
+const COUNT_LABELS: Record<string, string> = {
+  projects: "Projects",
+  skills: "Skills",
+  skillGroups: "Skill groups",
+  experience: "Experience",
+  education: "Education",
+  navigation: "Menu links",
+};
+
+function countLabel(key: string): string {
+  return COUNT_LABELS[key] ?? key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+}
+
+const OUTCOME_LABELS: Record<string, string> = {
+  SUCCESS: "Passed",
+  PARTIAL: "Passed with warnings",
+  FAILED: "Failed",
+};
+
+const SUPPORT_LABELS: Record<string, string> = {
+  SUPPORTED: "Supported",
+  UNSUPPORTED: "Not supported",
+  UNCERTAIN: "Uncertain",
+};
+
 function formatDuration(ms: number | null): string {
   if (ms === null) return "—";
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
@@ -160,7 +189,7 @@ export function InsightsSection() {
                     }
                   />
                   {Object.entries(insights.scans.counts).map(([key, value]) => (
-                    <Row key={key} label={key} value={String(value)} />
+                    <Row key={key} label={countLabel(key)} value={String(value)} />
                   ))}
                 </dl>
               </section>
@@ -171,7 +200,15 @@ export function InsightsSection() {
                 </h3>
                 <dl className="divide-y divide-border">
                   <Row label="Checks run" value={String(insights.verification.total)} />
-                  <Row label="Last outcome" value={insights.verification.lastStatus ?? "—"} />
+                  <Row
+                    label="Last outcome"
+                    value={
+                      insights.verification.lastStatus
+                        ? (OUTCOME_LABELS[insights.verification.lastStatus] ??
+                          insights.verification.lastStatus)
+                        : "—"
+                    }
+                  />
                   <Row
                     label="Last checked"
                     value={
@@ -189,7 +226,7 @@ export function InsightsSection() {
                   <Row label="Name conflicts" value={String(insights.verification.conflictCount)} />
                   <Row label="Added by Forge" value={String(insights.verification.forgeAddedCount)} />
                   {Object.entries(insights.verification.liveCounts).map(([key, value]) => (
-                    <Row key={key} label={`live ${key}`} value={String(value)} />
+                    <Row key={key} label={`${countLabel(key)} on live site`} value={String(value)} />
                   ))}
                 </dl>
               </section>
@@ -215,7 +252,14 @@ export function InsightsSection() {
                     label="Form detected"
                     value={insights.contact.formDetected ? "yes" : "no"}
                   />
-                  <Row label="Support" value={insights.contact.support ?? "—"} />
+                  <Row
+                    label="Support"
+                    value={
+                      insights.contact.support
+                        ? (SUPPORT_LABELS[insights.contact.support] ?? insights.contact.support)
+                        : "—"
+                    }
+                  />
                   <Row
                     label="Sending enabled"
                     value={insights.contact.sendEnabled ? "yes" : "no"}

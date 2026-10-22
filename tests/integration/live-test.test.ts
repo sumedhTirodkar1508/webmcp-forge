@@ -84,16 +84,26 @@ describeDb("live agent test relay", () => {
     });
   }
 
+  /**
+   * Who is asking: the browser session that created the fixture site. Live
+   * tests are scoped to the session that started them, so tests that queue
+   * commands must be the same session as the one that opened the test.
+   */
+  function ownerOf(site: { id: string; createdBySessionId: string | null }) {
+    return { siteId: site.id, builderSessionId: site.createdBySessionId! };
+  }
+
   /** Opens a READY session directly, bypassing the builder-side ownership path. */
-  async function readySession(siteId: string, ttlMs = 60_000) {
+  async function readySession(siteId: string, ttlMs = 60_000, startedBy?: string) {
     const token = generateToken();
     const owner = await prisma.site.findUniqueOrThrow({
       where: { id: siteId },
-      select: { origin: true },
+      select: { origin: true, createdBySessionId: true },
     });
     await prisma.liveTestSession.create({
       data: {
         siteId,
+        createdBySessionId: startedBy ?? owner.createdBySessionId,
         tokenHash: hashToken(token),
         expectedOrigin: owner.origin,
         status: "READY",
@@ -137,6 +147,7 @@ describeDb("live agent test relay", () => {
     await prisma.liveTestSession.create({
       data: {
         siteId: site.id,
+        createdBySessionId: site.createdBySessionId,
         tokenHash: hashToken(token),
         expectedOrigin: site.origin,
         expiresAt: new Date(Date.now() + 60_000),
@@ -149,7 +160,7 @@ describeDb("live agent test relay", () => {
     });
     expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
 
-    const state = await svc.getLiveTestState(site.id);
+    const state = await svc.getLiveTestState(ownerOf(site));
     expect(state.connected).toBe(true);
     expect(state.availableTools).toContain("get_skills");
   });
@@ -211,7 +222,7 @@ describeDb("live agent test relay", () => {
     const site = await newSite();
     const token = await readySession(site.id);
 
-    const queued = await svc.queueCommand(site.id, "get_skills", {});
+    const queued = await svc.queueCommand(ownerOf(site), "get_skills", {});
     expect(queued).not.toBeNull();
 
     const first = await svc.claimNextCommand(token, site.publicId, site.origin);
@@ -226,7 +237,7 @@ describeDb("live agent test relay", () => {
   it("gives a command to only one of two concurrent polls", async () => {
     const site = await newSite();
     const token = await readySession(site.id);
-    await svc.queueCommand(site.id, "list_projects", {});
+    await svc.queueCommand(ownerOf(site), "list_projects", {});
 
     const results = await Promise.all([
       svc.claimNextCommand(token, site.publicId, site.origin),
@@ -239,7 +250,7 @@ describeDb("live agent test relay", () => {
   it("accepts a result once and ignores a duplicate post", async () => {
     const site = await newSite();
     const token = await readySession(site.id);
-    const queued = await svc.queueCommand(site.id, "get_skills", {});
+    const queued = await svc.queueCommand(ownerOf(site), "get_skills", {});
     await svc.claimNextCommand(token, site.publicId, site.origin);
 
     const first = await svc.completeCommand(token, site.publicId, site.origin, {
@@ -263,7 +274,7 @@ describeDb("live agent test relay", () => {
   it("truncates an oversized result rather than storing it whole", async () => {
     const site = await newSite();
     const token = await readySession(site.id);
-    const queued = await svc.queueCommand(site.id, "get_skills", {});
+    const queued = await svc.queueCommand(ownerOf(site), "get_skills", {});
     await svc.claimNextCommand(token, site.publicId, site.origin);
 
     await svc.completeCommand(token, site.publicId, site.origin, {
@@ -277,13 +288,13 @@ describeDb("live agent test relay", () => {
 
   it("does not queue a command when no target is connected", async () => {
     const site = await newSite();
-    expect(await svc.queueCommand(site.id, "get_skills", {})).toBeNull();
+    expect(await svc.queueCommand(ownerOf(site), "get_skills", {})).toBeNull();
   });
 
   it("reports a failure result without treating it as a completion", async () => {
     const site = await newSite();
     const token = await readySession(site.id);
-    const queued = await svc.queueCommand(site.id, "get_skills", {});
+    const queued = await svc.queueCommand(ownerOf(site), "get_skills", {});
     await svc.claimNextCommand(token, site.publicId, site.origin);
 
     await svc.completeCommand(token, site.publicId, site.origin, {
@@ -299,7 +310,7 @@ describeDb("live agent test relay", () => {
   it("times out honestly when the target never answers", async () => {
     const site = await newSite();
     await readySession(site.id);
-    const queued = await svc.queueCommand(site.id, "get_skills", {});
+    const queued = await svc.queueCommand(ownerOf(site), "get_skills", {});
 
     const outcome = await svc.awaitCommandResult(queued!.commandId, {
       timeoutMs: 30,

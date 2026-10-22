@@ -20,6 +20,8 @@ import { generateToken, hashToken } from "@/lib/tokens";
  * The session is deliberately narrow:
  *
  *   - it exists only while the owner has explicitly started a test;
+ *   - it is bound to the builder session that started it, so another visitor
+ *     working on the same site cannot steer, read or end it;
  *   - it is bound to one site and one exact origin;
  *   - it expires in minutes;
  *   - only its token hash is stored;
@@ -88,6 +90,18 @@ export function isConsequentialTool(value: string): boolean {
   return (LIVE_TEST_BLOCKED_TOOLS as readonly string[]).includes(value);
 }
 
+/**
+ * Whose live test this is: one browser session, working on one site.
+ *
+ * A site is shared by every visitor of its origin, so "the site" alone does not
+ * identify a test. Everything that finds, drives or ends a test takes this, so
+ * a caller cannot forget to scope by session.
+ */
+export interface LiveTestOwner {
+  siteId: string;
+  builderSessionId: string;
+}
+
 export interface LiveTestIssue {
   /** The raw token. Returned once, for the verification-style URL. */
   testUrl: string;
@@ -110,9 +124,15 @@ export async function startLiveTest(
     );
   }
 
-  // One live session at a time per site: a stale channel is a liability.
+  // One live session at a time per browser session and site: a stale channel is
+  // a liability. Only this session's own earlier test is closed — starting a
+  // test must never end another visitor's.
   await prisma.liveTestSession.updateMany({
-    where: { siteId: site.id, status: { in: ["PENDING", "READY"] } },
+    where: {
+      siteId: site.id,
+      createdBySessionId: session.id,
+      status: { in: ["PENDING", "READY"] },
+    },
     data: { status: "CLOSED", closedAt: new Date() },
   });
 
@@ -122,6 +142,7 @@ export async function startLiveTest(
   const created = await prisma.liveTestSession.create({
     data: {
       siteId: site.id,
+      createdBySessionId: session.id,
       tokenHash: hashToken(token),
       expectedOrigin: site.origin,
       expiresAt,
@@ -286,7 +307,7 @@ export async function completeCommand(
 
 /** Queues a tool call for the connected target. */
 export async function queueCommand(
-  siteId: string,
+  owner: LiveTestOwner,
   tool: LiveTestTool,
   args: Record<string, unknown>,
 ): Promise<{ commandId: string } | null> {
@@ -296,8 +317,15 @@ export async function queueCommand(
     throw new AppError("FORBIDDEN", `${tool} cannot be dispatched automatically.`);
   }
 
+  // Only a test this very session started. Another visitor's connected tab on
+  // the same site is not ours to command.
   const session = await prisma.liveTestSession.findFirst({
-    where: { siteId, status: "READY", expiresAt: { gt: new Date() } },
+    where: {
+      siteId: owner.siteId,
+      createdBySessionId: owner.builderSessionId,
+      status: "READY",
+      expiresAt: { gt: new Date() },
+    },
     orderBy: { createdAt: "desc" },
     select: { id: true, availableTools: true },
   });
@@ -359,18 +387,29 @@ export async function awaitCommandResult(
 /** Ends a session early, e.g. when the owner closes the panel. */
 export async function closeLiveTest(session: BuilderSession, siteId: string): Promise<void> {
   const site = await requireOwnedSiteFor(session, siteId);
+  // Only this session's own tests. Ending someone else's would be a way to
+  // disrupt another visitor on a shared site.
   await prisma.liveTestSession.updateMany({
-    where: { siteId: site.id, status: { in: ["PENDING", "READY"] } },
+    where: {
+      siteId: site.id,
+      createdBySessionId: session.id,
+      status: { in: ["PENDING", "READY"] },
+    },
     data: { status: "CLOSED", closedAt: new Date() },
   });
 }
 
-/** Whether a live target is currently connected for this site. */
+/** Whether a live target started by this session is currently connected. */
 export async function getLiveTestState(
-  siteId: string,
+  owner: LiveTestOwner,
 ): Promise<{ connected: boolean; expiresAt: string | null; availableTools: string[] }> {
   const session = await prisma.liveTestSession.findFirst({
-    where: { siteId, status: "READY", expiresAt: { gt: new Date() } },
+    where: {
+      siteId: owner.siteId,
+      createdBySessionId: owner.builderSessionId,
+      status: "READY",
+      expiresAt: { gt: new Date() },
+    },
     orderBy: { createdAt: "desc" },
     select: { expiresAt: true, availableTools: true },
   });

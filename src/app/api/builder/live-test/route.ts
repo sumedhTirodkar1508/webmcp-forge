@@ -19,11 +19,12 @@ export async function GET(request: Request): Promise<Response> {
     if (!session || !siteId) {
       return jsonOk({ connected: false, expiresAt: null, availableTools: [] });
     }
-    // Ownership matters even for a read: this reveals whether a channel exists.
+    // Scoped to this session even for a read: it reveals whether a channel
+    // exists, and a visitor must not learn about another visitor's.
     const owned = await import("@/lib/session").then((m) =>
       m.requireOwnedSiteFor(session, siteId),
     );
-    return jsonOk(await getLiveTestState(owned.id));
+    return jsonOk(await getLiveTestState({ siteId: owned.id, builderSessionId: session.id }));
   } catch (error) {
     return jsonError(error);
   }

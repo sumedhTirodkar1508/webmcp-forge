@@ -29,6 +29,8 @@ model BuilderSession {
 
   sites        Site[]
   siteAccess   SiteAccess[]
+  liveTests    LiveTestSession[]
+  scanRuns     ScanRun[]
 
   @@index([expiresAt])
   @@map("builder_sessions")
@@ -238,6 +240,13 @@ model ScanRun {
   siteId String @map("site_id") @db.Uuid
   site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
+  /// The browser session that started this scan. The hourly scan limit counts
+  /// by this, not by who first registered the site: a site is permanent per
+  /// origin, so "sites this session created" is nothing at all for a visitor
+  /// scanning an origin someone else registered first. Null on older rows.
+  sessionId String?         @map("session_id") @db.Uuid
+  session   BuilderSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
   status       ScanStatus @default(PENDING)
   pagesScanned Int        @default(0) @map("pages_scanned")
   pagesFailed  Int        @default(0) @map("pages_failed")
@@ -266,6 +275,7 @@ model ScanRun {
   aiUsageEvents AiUsageEvent[]
 
   @@index([siteId, startedAt])
+  @@index([sessionId, startedAt])
   @@map("scan_runs")
 }
 
@@ -451,6 +461,14 @@ model LiveTestSession {
   siteId String @map("site_id") @db.Uuid
   site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
+  /// The builder session that started this test. A site is shared by origin,
+  /// so a test must also be tied to the browser that opened it: only that
+  /// session may queue commands to the connected tab, read its state or end
+  /// it. Null on rows from before this column existed — those expire in
+  /// minutes and match no session.
+  createdBySessionId String?         @map("created_by_session_id") @db.Uuid
+  createdBySession   BuilderSession? @relation(fields: [createdBySessionId], references: [id], onDelete: SetNull)
+
   tokenHash      String   @unique @map("token_hash")
   expectedOrigin String   @map("expected_origin")
   status         LiveTestStatus @default(PENDING)
@@ -470,6 +488,7 @@ model LiveTestSession {
   commands LiveTestCommand[]
 
   @@index([siteId, createdAt])
+  @@index([siteId, createdBySessionId, status])
   @@index([expiresAt])
   @@map("live_test_sessions")
 }

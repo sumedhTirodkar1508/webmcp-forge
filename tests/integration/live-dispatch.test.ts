@@ -85,6 +85,8 @@ describeDb("live tool dispatch", () => {
     await prisma.liveTestSession.create({
       data: {
         siteId: site.id,
+        // Started by the same session that is now asking questions.
+        createdBySessionId: session.id,
         tokenHash: hashToken(token),
         expectedOrigin: origin,
         status: "READY",
@@ -94,14 +96,14 @@ describeDb("live tool dispatch", () => {
       },
     });
 
-    return { site, token };
+    return { site, token, owner: { siteId: site.id, builderSessionId: session.id } };
   }
 
   it("read tools still dispatch", async () => {
-    const { site } = await connectedSite();
+    const { owner } = await connectedSite();
 
     for (const tool of ["list_projects", "search_projects", "get_skills"] as const) {
-      const queued = await svc.queueCommand(site.id, tool, {});
+      const queued = await svc.queueCommand(owner, tool, {});
       expect(queued, tool).not.toBeNull();
       const row = await svc.readCommand(queued!.commandId);
       expect(row?.tool).toBe(tool);
@@ -110,9 +112,9 @@ describeDb("live tool dispatch", () => {
   });
 
   it("navigate_site dispatches a real command", async () => {
-    const { site } = await connectedSite();
+    const { owner } = await connectedSite();
 
-    const queued = await svc.queueCommand(site.id, "navigate_site", { destination: "Work" });
+    const queued = await svc.queueCommand(owner, "navigate_site", { destination: "Work" });
 
     expect(queued).not.toBeNull();
     const row = await svc.readCommand(queued!.commandId);
@@ -121,9 +123,9 @@ describeDb("live tool dispatch", () => {
   });
 
   it("focus_project dispatches a real command", async () => {
-    const { site } = await connectedSite();
+    const { owner } = await connectedSite();
 
-    const queued = await svc.queueCommand(site.id, "focus_project", { title: "Fieldnote" });
+    const queued = await svc.queueCommand(owner, "focus_project", { title: "Fieldnote" });
 
     expect(queued).not.toBeNull();
     const row = await svc.readCommand(queued!.commandId);
@@ -132,9 +134,9 @@ describeDb("live tool dispatch", () => {
   });
 
   it("prepare_contact_message dispatches but stages only", async () => {
-    const { site } = await connectedSite();
+    const { site, owner } = await connectedSite();
 
-    const queued = await svc.queueCommand(site.id, "prepare_contact_message", {
+    const queued = await svc.queueCommand(owner, "prepare_contact_message", {
       message: "Hello from WebMCP Forge.",
     });
 
@@ -150,14 +152,14 @@ describeDb("live tool dispatch", () => {
   });
 
   it("send_contact_message can never be auto-dispatched", async () => {
-    const { site } = await connectedSite();
+    const { site, owner } = await connectedSite();
 
     // Even though the browser advertises it, prose may not trigger it.
     expect(svc.isLiveTestTool("send_contact_message")).toBe(false);
     expect(svc.isConsequentialTool("send_contact_message")).toBe(true);
 
     await expect(
-      svc.queueCommand(site.id, "send_contact_message" as never, { confirmed: true }),
+      svc.queueCommand(owner, "send_contact_message" as never, { confirmed: true }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
 
     expect(
@@ -168,22 +170,22 @@ describeDb("live tool dispatch", () => {
   it("a tool the target did not register is never dispatched", async () => {
     // get_education is disabled in the demo's config v2, so the browser never
     // registered it.
-    const { site } = await connectedSite();
+    const { site, owner } = await connectedSite();
 
-    expect(await svc.queueCommand(site.id, "get_education", {})).toBeNull();
+    expect(await svc.queueCommand(owner, "get_education", {})).toBeNull();
     expect(
       await prisma.liveTestCommand.count({ where: { session: { siteId: site.id } } }),
     ).toBe(0);
   });
 
   it("dispatches nothing at all when no target is connected", async () => {
-    const { site } = await connectedSite();
+    const { site, owner } = await connectedSite();
     await prisma.liveTestSession.updateMany({
       where: { siteId: site.id },
       data: { status: "CLOSED", closedAt: new Date() },
     });
 
-    expect(await svc.queueCommand(site.id, "navigate_site", { path: "/work" })).toBeNull();
+    expect(await svc.queueCommand(owner, "navigate_site", { path: "/work" })).toBeNull();
   });
 });
 

@@ -129,7 +129,11 @@ function asToolRegistry(value: unknown): ToolRegistrySnapshot | null {
   };
 }
 
-export async function buildReadinessSnapshot(site: Site): Promise<ReadinessSnapshot> {
+export async function buildReadinessSnapshot(
+  site: Site,
+  /** Whose live test to report. Another visitor's connected tab is not visible. */
+  builderSessionId: string,
+): Promise<ReadinessSnapshot> {
   const [scan, current, verification, latestRun, publishedVersion, liveSession, demoUsed] =
     await Promise.all([
       getLatestScan(site.id),
@@ -146,7 +150,12 @@ export async function buildReadinessSnapshot(site: Site): Promise<ReadinessSnaps
         select: { version: true, publishedAt: true },
       }),
       prisma.liveTestSession.findFirst({
-        where: { siteId: site.id, status: "READY", expiresAt: { gt: new Date() } },
+        where: {
+          siteId: site.id,
+          createdBySessionId: builderSessionId,
+          status: "READY",
+          expiresAt: { gt: new Date() },
+        },
         orderBy: { createdAt: "desc" },
         select: { availableTools: true },
       }),

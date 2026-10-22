@@ -71,14 +71,25 @@ function extractJson(text: string): unknown {
 
 export async function interpretScan(
   representation: ScanRepresentation,
-  options: { onAttempt?: (record: AiAttemptRecord) => Promise<void> | void } = {},
+  options: {
+    onAttempt?: (record: AiAttemptRecord) => Promise<void> | void;
+    /**
+     * Skip the model and use the structural reading. Set when the deployment's
+     * overall AI budget is spent; the scan still succeeds, just less precisely.
+     */
+    skipAi?: boolean;
+  } = {},
 ): Promise<SemanticOutcome> {
-  if (!hasGeminiKey()) {
+  const budgetStop = Boolean(options.skipAi) && hasGeminiKey();
+
+  if (budgetStop || !hasGeminiKey()) {
     const heuristic = deriveHeuristicMapping(representation);
     return {
       ...heuristic,
       warnings: [
-        "AI interpretation is not configured, so the structure was detected automatically and may be less accurate.",
+        budgetStop
+          ? "Our AI helper has reached its daily limit, so the structure was detected automatically and may be less accurate. Scanning again later can improve the result."
+          : "AI interpretation is not configured, so the structure was detected automatically and may be less accurate.",
         ...heuristic.warnings,
       ],
       model: null,

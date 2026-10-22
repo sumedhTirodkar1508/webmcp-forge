@@ -3,6 +3,7 @@ import "server-only";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 
+import { getAiBudget } from "@/lib/ai/budget";
 import { runModelChain, type AiAttemptRecord } from "@/lib/ai/model-chain";
 import type { BuilderSession } from "@/generated/prisma/client";
 import { getEnv, hasGeminiKey } from "@/lib/env";
@@ -198,7 +199,17 @@ export async function askAgent(
     );
   }
 
-  const snapshot = await buildReadinessSnapshot(site);
+  // The overall cap, separate from the per-site question limit above: that one
+  // bounds a single portfolio, this one bounds the deployment's total spend.
+  const budget = await getAiBudget();
+  if (budget.exhausted) {
+    throw new AppError(
+      "AI_QUOTA",
+      "The demo assistant has reached its daily limit and is paused. It becomes available again as usage ages out of the last 24 hours — please try again later.",
+    );
+  }
+
+  const snapshot = await buildReadinessSnapshot(site, session.id);
   const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   /**
@@ -314,7 +325,7 @@ export async function askAgent(
   const args = routed.value.arguments;
 
   // --- Mode B: needs a real tool call ------------------------------------
-  const queued = await queueCommand(site.id, tool, args);
+  const queued = await queueCommand({ siteId: site.id, builderSessionId: session.id }, tool, args);
 
   if (!queued) {
     // No connected target. Say exactly that rather than answering anyway.

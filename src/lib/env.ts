@@ -89,6 +89,16 @@ const schema = z.object({
   SCAN_AI_BUDGET_MS: intFrom(30_000, 3_000, 120_000),
   SCAN_MAX_PER_SESSION_PER_HOUR: intFrom(10, 1, 1000),
 
+  /**
+   * Overall Gemini requests allowed per rolling 24 hours, across every visitor.
+   *
+   * The per-session scan limit is bypassed by clearing cookies, and the
+   * question limit is per site — neither bounds the total. This does. Once it
+   * is reached, scans fall back to the structural reading (no AI) and the
+   * assistant pauses until usage ages out of the window. 0 turns the cap off.
+   */
+  AI_GLOBAL_DAILY_LIMIT: intFrom(600, 0, 100_000),
+
   VERIFICATION_CHALLENGE_TTL_SECONDS: intFrom(300, 30, 3600),
 
   /**

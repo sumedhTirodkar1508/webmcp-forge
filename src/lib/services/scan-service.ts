@@ -2,6 +2,7 @@ import "server-only";
 
 import type { BuilderSession, ScanRun, Site } from "@/generated/prisma/client";
 import type { AiAttemptRecord } from "@/lib/ai/model-chain";
+import { getAiBudget } from "@/lib/ai/budget";
 import { availableRequirements } from "@/lib/ai/resolve-mapping";
 import { interpretScan } from "@/lib/ai/semantic";
 import { recommendSettings } from "@/lib/capabilities/settings";
@@ -32,22 +33,49 @@ export interface ScanOutcome {
   warnings: string[];
 }
 
-async function assertScanQuota(session: BuilderSession): Promise<void> {
+/**
+ * Counts this session's scans against the hourly limit and starts one, as a
+ * single atomic step.
+ *
+ * Two things were wrong with counting first and creating after:
+ *
+ *   - It counted scans on sites the session had *created*. A site is permanent
+ *     per origin, so only the first visitor to an origin ever created its site;
+ *     scanning an origin someone else registered first was never counted at
+ *     all. Scans now record the session that started them and are counted by
+ *     that.
+ *   - Between the count and the insert, parallel requests could all see "under
+ *     the limit" and all proceed. A transaction-scoped advisory lock keyed on
+ *     the session serialises just that session's reservations; it releases at
+ *     commit, so it is safe through a transaction-pooling connection. The slow
+ *     work — crawling and the model call — happens after, outside the lock.
+ *
+ * Exported for tests; callers go through `scanSite`.
+ */
+export async function reserveScanRun(
+  session: BuilderSession,
+  siteId: string,
+): Promise<ScanRun> {
+  const limit = getEnv().SCAN_MAX_PER_SESSION_PER_HOUR;
   const since = new Date(Date.now() - 60 * 60 * 1000);
-  const recent = await prisma.scanRun.count({
-    where: {
-      // Anti-abuse is per browser session, which is what sessions are for now.
-      site: { createdBySessionId: session.id },
-      startedAt: { gte: since },
-    },
-  });
 
-  if (recent >= getEnv().SCAN_MAX_PER_SESSION_PER_HOUR) {
-    throw new AppError(
-      "RATE_LIMITED",
-      "You have run a lot of scans in the last hour. Please wait a little while before scanning again.",
-    );
-  }
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`scan-quota:${session.id}`}, 0))`;
+
+    const recent = await tx.scanRun.count({
+      where: { sessionId: session.id, startedAt: { gte: since } },
+    });
+    if (recent >= limit) {
+      throw new AppError(
+        "RATE_LIMITED",
+        "You have run a lot of scans in the last hour. Please wait a little while before scanning again.",
+      );
+    }
+
+    return tx.scanRun.create({
+      data: { siteId, sessionId: session.id, status: "RUNNING" },
+    });
+  });
 }
 
 export async function scanSite(
@@ -55,13 +83,9 @@ export async function scanSite(
   siteId: string,
 ): Promise<ScanOutcome> {
   const site = await requireOwnedSiteFor(session, siteId);
-  await assertScanQuota(session);
+  const scanRun = await reserveScanRun(session, site.id);
 
   const env = getEnv();
-
-  const scanRun = await prisma.scanRun.create({
-    data: { siteId: site.id, status: "RUNNING" },
-  });
 
   const recordAttempt = async (attempt: AiAttemptRecord) => {
     await prisma.aiUsageEvent.create({
@@ -87,8 +111,17 @@ export async function scanSite(
       budgetMs: env.SCAN_TIME_BUDGET_MS,
     });
 
+    // The overall spend cap. Past it the scan still succeeds, using the
+    // structural reading instead of a model, so a busy day degrades quality
+    // rather than refusing visitors.
+    const budget = await getAiBudget();
+    if (budget.exhausted) {
+      logger.warn("ai_daily_budget_exhausted", { used: budget.used, limit: budget.limit });
+    }
+
     const semantic = await interpretScan(crawl.representation, {
       onAttempt: recordAttempt,
+      skipAi: budget.exhausted,
     });
 
     const warnings = [...semantic.warnings];
